@@ -357,6 +357,13 @@ class App:
         return False
 
     def _display_tick(self):
+        try:
+            return self._display_tick_inner()
+        except Exception as e:
+            flog.log_exc("显示循环异常（定时器继续运行）", e)
+            return True
+
+    def _display_tick_inner(self):
         if self.settings.get("mode", "event") == "event":
             le = getattr(self, "_last_event", None)
             if le and time.time() - le[0] > 5.0:
@@ -397,6 +404,15 @@ class App:
                             f"{',REC' if d.get('rec_active') else ''}]"
                             for h, d in sorted(self.devices.items()))
                         db = float(np.max(self.levels.db))
+                        # 音频长时间贴地板时留个警告：要么设备没在推流，
+                        # 要么处理链出问题了 —— 后期排查时这条很关键
+                        if db <= -119.0:
+                            self._silent_n = getattr(self, "_silent_n", 0) + 1
+                            if self._silent_n == 2:
+                                flog.log("音频连续 2 分钟无数据（电平贴地板）",
+                                         level="WARN")
+                        else:
+                            self._silent_n = 0
                         flog.log(
                             f"stats: fps={self._fps_last:.1f} lag={age:.0f}ms "
                             f"audio={db:.1f}dB devs={devs or '-'}")
@@ -421,16 +437,21 @@ class App:
         return False
 
     def _audio_tick(self):
-        n = 0
-        # 用"当前设备"的世代号比对（不是全局 epoch，否则永远不匹配 → 音频全被丢）
-        cur_ep = (self.devices.get(self.host) or {}).get("epoch", 0)
-        while self._audio_q and n < 8:
-            item = self._audio_q.popleft()
-            ep, a = item if isinstance(item, tuple) else (cur_ep, item)
-            if ep != cur_ep:
-                continue        # 该设备已重连/切换，丢弃旧数据
-            self._process_audio(a)
-            n += 1
+        # 必须 try/except：这是 GLib 定时器回调，一旦抛异常
+        # 定时器会被永久移除，表现为"音频从此再也不动"（很难查）
+        try:
+            n = 0
+            # 用"当前设备"的世代号比对（不是全局 epoch，否则音频全被丢）
+            cur_ep = (self.devices.get(self.host) or {}).get("epoch", 0)
+            while self._audio_q and n < 8:
+                item = self._audio_q.popleft()
+                ep, a = item if isinstance(item, tuple) else (cur_ep, item)
+                if ep != cur_ep:
+                    continue    # 该设备已重连/切换，丢弃旧数据
+                self._process_audio(a)
+                n += 1
+        except Exception as e:
+            flog.log_exc("音频处理异常（定时器继续运行）", e)
         return True
 
     def _process_audio(self, a):
