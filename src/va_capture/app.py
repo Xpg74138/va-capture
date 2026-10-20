@@ -11,7 +11,7 @@ from .constants import *
 from .config import *
 from .config import _apply_css, _pick_out_root, _config_path
 from .readers import (VideoReader, AudioReader, probe_vaapi, probe_video,
-                      kill_orphan_streams)
+                      kill_orphan_streams, kill_all_orphan_streams)
 from .dsp import Locator, EventDetector, band_level
 from .widgets import Levels, Wave, Compass, Waterfall, np_to_pixbuf, draw_digit
 from .dialogs import CalibDialog, SettingsDialog
@@ -33,6 +33,10 @@ class App:
         flog.log("=" * 60)
         flog.log(f"启动 va-capture {__import__('va_capture').__version__}")
         flog.log(f"日志文件: {flog.log_path()}")
+        # 清扫上一次实例遗留的拉流进程（否则会占着设备端客户端槽位）
+        n_orphan = kill_all_orphan_streams()
+        if n_orphan:
+            flog.log(f"清理了 {n_orphan} 个上次遗留的拉流进程", level="WARN")
         flog.log(f"设备: {host}  解码: {self.settings.get('hwaccel')}  "
                  f"传输: {self.settings.get('transport')}  "
                  f"算法: {self.settings.get('algorithm')}  "

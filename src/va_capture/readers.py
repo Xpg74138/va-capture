@@ -3,6 +3,11 @@ import os, subprocess, threading, time
 import numpy as np
 import fcntl
 import collections
+import gi
+gi.require_version('Gtk', '3.0')
+gi.require_version('Gdk', '3.0')
+gi.require_version('GdkPixbuf', '2.0')
+gi.require_version('Pango', '1.0')
 from gi.repository import GLib, GdkPixbuf, Pango, Gdk, Gtk
 
 from .constants import AUDIO_CH, AUDIO_RATE, AUDIO_BLOCK, AUDIO_BYTES
@@ -19,6 +24,40 @@ def probe_video(url, timeout=10):
         pass
     return None
 
+
+
+def kill_all_orphan_streams():
+    """
+    启动时清扫**所有**遗留拉流进程（不区分设备）。
+
+    为什么需要：kill_orphan_streams(host) 只清理"要连接的那台"，
+    切到别的设备后，原设备的 ffmpeg 会一直挂着：
+      - 占着设备端 RTSP 客户端槽位（音频/视频都是单客户端设计）
+      - 空转消耗 CPU、也让我们误以为设备还连着
+
+    只杀命令行里同时含 ffmpeg 与 rtsp:// 的进程，不会误伤别的程序。
+    """
+    killed = 0
+    try:
+        me = os.getpid()
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit() or int(pid) == me:
+                continue
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    cmd = f.read().replace(b"\0", b" ").decode("utf-8", "ignore")
+            except Exception:
+                continue
+            if cmd.startswith("ffmpeg") or "/ffmpeg" in cmd.split(" ")[0]:
+                if "rtsp://" in cmd:
+                    try:
+                        os.kill(int(pid), 9)
+                        killed += 1
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return killed
 
 
 def kill_orphan_streams(host):
