@@ -1,0 +1,1394 @@
+"""主窗口与业务逻辑"""
+import os, sys, json, time, signal, subprocess, threading, collections
+import numpy as np
+import fcntl
+import gi
+gi.require_version('Gtk', '3.0')
+gi.require_version('Gdk', '3.0')
+from gi.repository import Gtk, Gdk, GdkPixbuf, GLib, Pango
+
+from .constants import *
+from .config import *
+from .config import _apply_css, _pick_out_root, _config_path
+from .readers import (VideoReader, AudioReader, probe_vaapi, probe_video,
+                      kill_orphan_streams)
+from .dsp import Locator, EventDetector, band_level
+from .widgets import Levels, Wave, Compass, Waterfall, np_to_pixbuf, draw_digit
+from .dialogs import CalibDialog, SettingsDialog
+
+class App:
+    def __init__(self, host):
+        self.host = host
+        # 多设备：host -> {host,connected,rec,rec_dir,rec_active,status}
+        self.devices = {}
+        self._epoch = 0          # 每次连接/切换自增，用于丢弃旧设备残留数据
+        self.vreader = None
+        self.areader = None
+        self.recs = []
+        self._rec_active = False
+        self.fps = 0.0
+        self.settings = load_settings()
+        self.locator = Locator(angle_offset=float(self.settings.get("angle_offset", 0.0)))
+        self.detector = EventDetector()
+        self._ring = collections.deque(maxlen=200)    # 约 2 秒音频（容纳长事件起音）
+        self._event_no = 0
+        self._last_event = None                        # (t, az, conf, peak_db)
+        self._event_t0 = 0.0
+        self._apply_sensitivity()
+        cm = self.settings.get("channel_map")
+        if cm and len(cm) == AUDIO_CH and sorted(cm) == list(range(AUDIO_CH)):
+            self.locator.channel_map = [int(c) for c in cm]
+        gc = self.settings.get("gain_cal")
+        if gc and len(gc) == AUDIO_CH:
+            self.locator.gain_cal = np.array(gc, dtype=np.float32)
+        self._lbuf = None
+        self._video_lock = threading.Lock()
+        self._newest_frame = None
+        self._last_pb = None
+        self._age = 0.0
+        self._audio_q = collections.deque(maxlen=60)
+        GLib.timeout_add(33, self._display_tick)
+        GLib.timeout_add(20, self._audio_tick)
+        self.src_size = ""
+
+        self.win = Gtk.Window(title="TinyVision 监看台 — 视频 + 8 轨音频")
+        # 固定窗口尺寸：布局不再随内容变化而跳动
+        self.win.set_default_size(1300, 930)
+        self.win.set_resizable(False)
+        _apply_css()
+        # 监看窗口置顶，避免被其它窗口遮住
+        self.win.set_keep_above(True)
+        self.win.connect("destroy", self.quit)
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.win.add(vbox)
+
+        # ---- 工具栏 ----
+        bar = Gtk.Box(spacing=6)
+        bar.set_margin_top(6)
+        bar.set_margin_start(8)
+        bar.set_margin_end(8)
+
+        bar.pack_start(Gtk.Label(label="设备 IP:"), False, False, 0)
+        self.ip = Gtk.Entry()
+        self.ip.set_text(self.settings.get("last_host", host))
+        self.ip.set_width_chars(13)
+        bar.pack_start(self.ip, False, False, 0)
+
+        # 发现到的设备列表（多设备时从这里挑）
+        self.cmb_dev = Gtk.ComboBoxText()
+        self.cmb_dev.set_size_request(118, -1)
+        self.cmb_dev.connect("changed", self._on_pick_device)
+        bar.pack_start(self.cmb_dev, False, False, 0)
+
+        self.btn_scan = Gtk.Button(label="发现")
+        self.btn_scan.connect("clicked", lambda *_: self.scan_devices())
+        bar.pack_start(self.btn_scan, False, False, 0)
+
+        self.btn_conn = Gtk.Button(label="连接")
+        self.btn_conn.connect("clicked", lambda *_: self.connect())
+        bar.pack_start(self.btn_conn, False, False, 0)
+
+        self.btn_disc = Gtk.Button(label="断开")
+        self.btn_disc.set_sensitive(False)
+        self.btn_disc.connect("clicked", lambda *_: self.disconnect())
+        bar.pack_start(self.btn_disc, False, False, 0)
+
+        bar.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL),
+                       False, False, 6)
+
+        self.btn_recv = Gtk.ToggleButton(label="录制音视频")
+        self.btn_recv.connect("toggled", self.toggle_rec_video)
+        bar.pack_start(self.btn_recv, False, False, 0)
+
+
+
+        self.btn_snap = Gtk.Button(label="截帧")
+        self.btn_snap.connect("clicked", self.snapshot)
+        bar.pack_start(self.btn_snap, False, False, 0)
+
+        self.btn_cal = Gtk.Button(label="校准")
+        self.btn_cal.set_tooltip_text("点一下，然后在设备正前方拍手 3 秒，自动把该方向设为 0°")
+        self.btn_cal.connect("clicked", self.open_calibration)
+        bar.pack_start(self.btn_cal, False, False, 0)
+
+        self.btn_set = Gtk.Button(label="设置")
+        self.btn_set.connect("clicked", self.open_settings)
+        bar.pack_start(self.btn_set, False, False, 0)
+
+        vbox.pack_start(bar, False, False, 0)
+
+        # ---- 主区 ----
+        paned = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        paned.set_margin_start(8)
+        paned.set_margin_end(8)
+
+        self.video = Gtk.Image()
+        self.video.set_size_request(960, 540)
+        self.video.set_halign(Gtk.Align.CENTER)
+        self.video.set_valign(Gtk.Align.CENTER)
+        self.video.set_hexpand(True)
+
+        # 连接期间占位提示，让用户立刻看到"正在干活"
+        self.video_hint = Gtk.Label()
+        self.video_hint.set_markup(
+            "<span size='x-large' color='#8b93a3'>正在连接…</span>")
+        self.video_hint.set_halign(Gtk.Align.CENTER)
+        self.video_hint.set_valign(Gtk.Align.CENTER)
+        _ov = Gtk.Overlay()
+        _ov.add(self.video)
+        _ov.add_overlay(self.video_hint)
+        self._video_overlay = _ov
+        paned.pack_start(_ov, True, True, 0)
+
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        right.set_size_request(PANEL_W + 6, -1)   # 与 PANEL_W 对齐
+        self.levels = Levels(self.settings.get("meter_floor", -60))
+        right.pack_start(titled("电平表", self.levels), False, False, 0)
+
+        self.waterfall = Waterfall()
+        right.pack_start(titled("瀑布图", self.waterfall), False, False, 0)
+
+        self.lbl_az = Gtk.Label(label="方位角  --")
+        self.lbl_az.set_markup(
+            "<span font_family='Monospace' weight='bold' size='large'>--.-°</span>"
+            " 待事件　<span size='small' color='#8b93a3'>等待声音触发</span>")
+        # 单行 + 省略号：内容变化时高度不变，避免布局跳动
+        self.lbl_az.set_ellipsize(Pango.EllipsizeMode.END)
+        self.lbl_az.set_single_line_mode(True)
+        self.lbl_az.set_width_chars(26)
+        self.lbl_az.set_max_width_chars(26)
+        self.lbl_az.set_size_request(PANEL_W - 12, 22)
+        azbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        azbox.pack_start(self.lbl_az, False, False, 0)
+        self._azbox = azbox
+
+        # ---- 事件记录（文字输出）----
+        frame = Gtk.Frame(label=None)
+        _lbl = Gtk.Label()
+        _lbl.set_markup("<span size='small' color='#9aa3b2'>事件记录</span>")
+        _lbl.set_xalign(0.0)
+        _lbl.set_margin_start(4)
+        frame.set_label_widget(_lbl)
+        frame.set_size_request(PANEL_W, -1)
+        self.log_view = Gtk.TextView()
+        self.log_view.set_editable(False)
+        self.log_view.set_cursor_visible(False)
+        self.log_view.set_monospace(True)
+        self.log_view.set_wrap_mode(Gtk.WrapMode.NONE)
+        self.log_view.set_left_margin(4)
+        self.log_view.set_right_margin(4)
+        self.log_buf = self.log_view.get_buffer()
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        sw.set_size_request(PANEL_W - 8, LOGBOX_H)
+        sw.add(self.log_view)
+        frame.add(sw)
+        right.pack_start(frame, False, False, 0)
+
+        self.lbl_cal = Gtk.Label()
+        self.lbl_cal.set_xalign(0.5)
+        self.lbl_cal.set_ellipsize(Pango.EllipsizeMode.END)
+        self.lbl_cal.set_single_line_mode(True)
+        self.lbl_cal.set_width_chars(30)
+        self.lbl_cal.set_size_request(PANEL_W - 12, 18)
+        azbox.pack_start(self.lbl_cal, False, False, 0)
+        right.pack_start(titled("方位", azbox), False, False, 0)
+
+        right.set_hexpand(False)
+        paned.pack_end(right, False, False, 0)
+        paned.set_margin_start(10)
+        paned.set_margin_end(6)
+        paned.set_margin_top(6)
+        vbox.pack_start(paned, True, True, 0)
+
+        # ---- 底部一行：设备列表 | 波形 | 罗盘（同一水平高度）----
+        bottom = Gtk.Box(spacing=10)
+        bottom.set_margin_start(10)
+        bottom.set_margin_end(10)
+        bottom.set_margin_top(6)
+        bottom.set_margin_bottom(4)
+
+        # 设备列表：和波形同一行，放在最左边
+        devbox = Gtk.Frame()
+        _dl = Gtk.Label()
+        _dl.set_markup("<span size='small' color='#9aa3b2'>设备列表（点击切换）</span>")
+        _dl.set_xalign(0.0)
+        _dl.set_margin_start(4)
+        devbox.set_label_widget(_dl)
+        self.dev_rows = Gtk.ListBox()
+        self.dev_rows.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.dev_rows.connect("row-activated", self._on_row_activated)
+        _sw = Gtk.ScrolledWindow()
+        _sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        _sw.set_size_request(DEV_W - 8, 190)
+        _sw.add(self.dev_rows)
+        devbox.add(_sw)
+        devbox.set_size_request(DEV_W, -1)
+        devbox.set_valign(Gtk.Align.CENTER)
+        bottom.pack_start(devbox, False, False, 0)
+
+        self.wave = Wave()
+        self.wave.set_valign(Gtk.Align.CENTER)
+        wf = titled("8 通道波形", self.wave)
+        wf.set_size_request(-1, -1)
+        bottom.pack_start(wf, True, True, 0)
+
+        self.compass = Compass()
+        self.compass.set_valign(Gtk.Align.CENTER)
+        bottom.pack_end(titled("方位罗盘", self.compass), False, False, 0)
+        vbox.pack_start(bottom, False, False, 0)
+
+        # ---- 状态栏 ----
+        # 不用 Gtk.Statusbar：它的最小宽度等于当前消息宽度，
+        # 长消息（比如录制路径）会把整个窗口顶宽，导致布局看起来"又不对齐"。
+        self.status = Gtk.Label()
+        self.status.set_xalign(0.0)
+        self.status.set_ellipsize(Pango.EllipsizeMode.END)
+        self.status.set_single_line_mode(True)
+        self.status.set_size_request(1220, 20)
+        self.status.set_margin_start(8)
+        self.ctx = None
+        vbox.pack_start(self.status, False, False, 0)
+
+        # ---- 底部信息行：左侧视频信息，右侧帧率，水平对齐 ----
+        self.lbl_size = Gtk.Label(label="--x--")
+        self.lbl_size.set_xalign(0.0)
+        self.lbl_size.set_ellipsize(Pango.EllipsizeMode.END)
+        self.lbl_size.set_hexpand(True)
+        self.lbl_size.set_size_request(-1, 18)
+        self.lbl_fps = Gtk.Label(label="视频 -- fps")
+        self.lbl_fps.set_xalign(1.0)
+        self.lbl_fps.set_size_request(240, 18)
+        sbox = Gtk.Box(spacing=8)
+        sbox.set_margin_start(8)
+        sbox.set_margin_end(10)
+        sbox.pack_start(self.lbl_size, True, True, 0)
+        sbox.pack_end(self.lbl_fps, False, False, 0)
+        vbox.pack_start(sbox, False, False, 4)
+
+        self._update_cal_label()
+        self.win.show_all()
+        self.win.present()
+
+    # ---- 状态 ----
+    def log_line(self, text):
+        """向事件记录框追加一行（自动滚动、限制 200 行）"""
+        try:
+            self.log_buf.insert(self.log_buf.get_end_iter(), text + "\n")
+            n = self.log_buf.get_line_count()
+            if n > 200:
+                start = self.log_buf.get_start_iter()
+                end = self.log_buf.get_iter_at_line(n - 200)
+                self.log_buf.delete(start, end)
+            self.log_view.scroll_to_iter(
+                self.log_buf.get_end_iter(), 0.0, False, 0.0, 1.0)
+        except Exception:
+            pass
+
+    def set_status(self, msg):
+        # 过长的消息会撑大窗口宽度，截断
+        m = msg if len(msg) <= 55 else msg[:52] + "…"
+        self.status.set_text(m)
+        if not m.startswith("显示"):
+            self.log_line(f"{time.strftime('%H:%M:%S')}  -- {m}")
+        return False
+
+    def on_video_info(self, sw, sh, w, h, mode):
+        self.lbl_size.set_text(f"视频 {sw}×{sh} → {w}×{h}　{mode}")
+        return False
+
+    def _hide_video_hint(self):
+        try:
+            self.video_hint.set_visible(False)
+        except Exception:
+            pass
+
+    def _show_video_hint(self, text="正在连接…"):
+        try:
+            self.video_hint.set_markup(
+                f"<span size='x-large' color='#8b93a3'>{text}</span>")
+            self.video_hint.set_visible(True)
+            self._hint_visible = True
+        except Exception:
+            pass
+
+    def on_fps(self, f):
+        self.fps = f
+        self.lbl_fps.set_text(f"视频 {f:.1f} fps")
+        return False
+
+    def on_frame(self, pb, host=None, epoch=None):
+        """
+        所有已连接设备的帧都收，按设备存放；界面只显示当前选中那台。
+
+        注意：状态标记必须用"这帧属于哪台设备"(h)，不能用当前显示设备 ——
+        否则后台设备的帧会把正在看的设备误标成"已连接"（真踩过的坑）。
+        """
+        h = host or self.host
+        d = self._dev(h)
+        if epoch is not None and epoch != d.get("epoch"):
+            return                      # 该设备已重连/断开，丢弃旧数据
+        d["newest_frame"] = (time.perf_counter(), pb)
+        if d.get("status") != "已连接":
+            d["status"] = "已连接"
+            d["connected"] = True
+            GLib.idle_add(self._update_device_list)
+        return False
+
+    def _display_tick(self):
+        if self.settings.get("mode", "event") == "event":
+            le = getattr(self, "_last_event", None)
+            if le and time.time() - le[0] > 5.0:
+                self._last_event = None
+                self.compass.clear_fix()
+                self.lbl_az.set_markup(
+                    "<span font_family='Monospace' weight='bold' size='large'>--.-°</span> 待事件"
+                    "　<span size='small' color='#8b93a3'>等待声音触发</span>")
+        dcur = self.devices.get(self.host) or {}
+        item = dcur.get("newest_frame")
+        if item is not None:
+            dcur["newest_frame"] = None
+            t_read, pb = item
+            dcur["last_pb"] = pb          # 每台设备各自保存最后一帧
+            self._age = (time.perf_counter() - t_read) * 1000.0
+            if getattr(self, "_hint_visible", False):
+                self._hint_visible = False
+                self._hide_video_hint()
+        pb_show = dcur.get("last_pb")
+        if pb_show is not None:
+            self.video.set_from_pixbuf(pb_show)
+            self._dn = getattr(self, "_dn", 0) + 1
+            now = time.time()
+            if not hasattr(self, "_dt0"):
+                self._dt0 = now
+            elif now - self._dt0 >= 1.0:
+                age = getattr(self, "_age", 0.0)
+                self.lbl_fps.set_text(
+                    f"显示 {self._dn / (now - self._dt0):.1f} fps"
+                    f"   延迟 {age:.0f}ms")
+                self._dn = 0
+                self._dt0 = now
+        return True
+
+    def on_audio(self, a, host=None, epoch=None):
+        """由音频线程调用：只有当前显示设备的数据进入处理队列"""
+        h = host or self.host
+        d = self._dev(h)
+        if epoch is not None and epoch != d.get("epoch"):
+            return False        # 该设备已重连，丢弃旧数据
+        if h != self.host:
+            return False        # 后台设备：不处理音频（省 CPU，录制不受影响）
+        # 带上数据所属世代：取用时不匹配的直接丢掉，
+        # 否则切换设备那一瞬间旧设备残留的最后一块会把波形"定格"
+        self._audio_q.append(
+            (epoch if epoch is not None else d.get("epoch", 0), a))
+        return False
+
+    def _audio_tick(self):
+        n = 0
+        # 用"当前设备"的世代号比对（不是全局 epoch，否则永远不匹配 → 音频全被丢）
+        cur_ep = (self.devices.get(self.host) or {}).get("epoch", 0)
+        while self._audio_q and n < 8:
+            item = self._audio_q.popleft()
+            ep, a = item if isinstance(item, tuple) else (cur_ep, item)
+            if ep != cur_ep:
+                continue        # 该设备已重连/切换，丢弃旧数据
+            self._process_audio(a)
+            n += 1
+        return True
+
+    def _process_audio(self, a):
+        rms = np.sqrt(np.mean(a * a, axis=1) + 1e-12)
+        self._last_rms = rms
+        # 按 channel_map 重排成"物理位置"顺序，供罗盘显示
+        try:
+            phys = rms[np.asarray(self.locator.channel_map)]
+            self.compass.set_mic_levels(20.0 * np.log10(phys + 1e-12))
+            self.compass.angle_off_disp = float(self.locator.angle_offset)
+        except Exception:
+            pass
+
+        # 敲击检测用的包络：快攻(立即跟上) + 慢放(0.85 衰减)
+        env = getattr(self, "_env", None)
+        if env is None:
+            self._env = rms.copy()
+            self._env_base = rms.copy()
+        else:
+            self._env = np.maximum(rms, env * 0.82)
+            # 基线用很慢的跟踪，避免被敲击拉高
+            self._env_base = self._env_base * 0.99 + rms * 0.01
+        self.levels.update_db(20.0 * np.log10(rms + 1e-12))
+        self.wave.push(a)
+
+        # ---------- 事件检测（咳嗽/犬吠等短促声音）----------
+        # 注意：这段必须在"事件模式提前返回"之前，否则事件模式永远不会触发
+        self._ring.append(a.copy())
+        ev = self.detector.feed(float(np.max(band_level(a))), time.time())
+        if ev == "start":
+            self._event_t0 = time.time()
+            # 记录起音时刻在环形缓冲中的位置（块数），定位时从起音开始取窗口
+            self._ev_start_pos = len(self._ring)
+        elif ev == "end":
+            self._localize_event()
+
+        if self.settings.get("mode", "event") == "event":
+            return False          # 事件模式：只在事件结束时定位
+
+        # ---------- 连续模式：每 ~24ms 算一次 ----------
+        if self._lbuf is None:
+            self._lbuf = a.copy()
+        else:
+            self._lbuf = np.concatenate((self._lbuf, a), axis=1)
+
+        _now = time.time()
+        _due = (_now - getattr(self, "_last_loc_t", 0.0)) >= 0.024
+        if self._lbuf.shape[1] >= 1024 and _due:
+            self._last_loc_t = _now
+            # 取最后 1024 点后必须裁剪，否则缓冲区只增不减：
+            # 每秒涨 1.5MB，且 concatenate 是 O(n²)，越跑越慢直到卡死。
+            blk = self._lbuf[:, -1024:].copy()
+            self._lbuf = blk
+            try:
+                res = self.locator.process(blk)
+            except Exception:
+                res = None
+            self._last_peak = res[0]
+            if res:
+                az, conf = self._smooth_azimuth(res[0])
+                extra = ""
+                if len(res) > 1:
+                    extra = "   " + " ".join(
+                        f"+{a:.0f}°({dir_name(a)})" for a, c in res[1:])
+                stale = getattr(self, "_stale", False)
+                self.compass.set_azimuth(az, conf, res, valid=not stale)
+                self.waterfall.push(az, conf)
+                if getattr(self, "_cal_samples", None) is not None and conf >= 1.5:
+                    self._cal_samples.append(az)
+                self._maybe_log_csv(az, conf)
+                try:
+                    p = self._last_rms[np.asarray(self.locator.channel_map)]
+                    k = int(np.argmax(p))
+                    loud = f"   最强 位置{k+1}"
+                except Exception:
+                    loud = ""
+                # 强瞬态但没有方向：说明是敲击板子（固体传声），明确提示
+                impulse_nodir = (self._level_db() > self.IMPULSE_DB
+                                 and conf < 1.60)
+                if impulse_nodir:
+                    self.lbl_az.set_markup(
+                        "<span font_family='Monospace' weight='bold' size='large'>--.-°</span> 瞬态"
+                        "　<span size='small' color='#8b93a3'>板体传声·无方向</span>")
+                elif stale:
+                    # 保留旧角度会误导，直接说明当前没有可靠方向
+                    self.lbl_az.set_markup(
+                        "<span font_family='Monospace' weight='bold' size='large'>--.-°</span> 无源"
+                        f"　<span size='small' color='#8b93a3'>置信{conf:.1f}{loud}</span>")
+                else:
+                    self.lbl_az.set_markup(
+                        f"<span font_family='Monospace' weight='bold' size='large'>{az:05.1f}°</span> {dir_name(az)}"
+                        f"　<span size='small' color='#8b93a3'>置信{conf:.1f}"
+                        f" · {conf_word(conf)}{extra}{loud}</span>")
+        return False
+
+    # ---- 连接 ----
+    # ---------------- 多设备管理 ----------------
+    def _dev(self, host=None):
+        """取（或创建）某台设备的状态记录"""
+        host = host or self.host
+        d = self.devices.get(host)
+        if d is None:
+            d = {"host": host, "connected": False, "rec": None,
+                 "rec_dir": "", "rec_active": False, "status": "未连接",
+                 "vreader": None, "areader": None,
+                 "newest_frame": None, "epoch": 0, "last_pb": None}
+            self.devices[host] = d
+        return d
+
+    def _update_device_list(self):
+        """刷新左下角设备列表"""
+        try:
+            for row in list(self.dev_rows.get_children()):
+                self.dev_rows.remove(row)
+            for host in sorted(self.devices):
+                d = self.devices[host]
+                bits = []
+                st = d.get("status", "未连接")
+                if st == "已连接":
+                    bits.append("<span color='#4ade80'>● 已连接</span>")
+                elif st == "连接中":
+                    bits.append("<span color='#facc15'>◌ 连接中</span>")
+                else:
+                    bits.append("<span color='#8b93a3'>○ 未连接</span>")
+                if d["rec_active"]:
+                    bits.append("<span color='#f87171'>● 录制中</span>")
+                mark = "▶ " if host == self.host else "  "
+                lbl = Gtk.Label()
+                lbl.set_xalign(0.0)
+                lbl.set_markup(f"{mark}<b>{host}</b>　" + "　".join(bits))
+                lbl.set_margin_start(4)
+                row = Gtk.ListBoxRow()
+                row.add(lbl)
+                row.host = host
+                self.dev_rows.add(row)
+            self.dev_rows.show_all()
+        except Exception:
+            pass
+
+    def switch_to(self, host):
+        """切换显示到某台设备（录制不受影响，各设备独立进行）"""
+        if not host:
+            return
+        if host == self.host and (self.vreader or self.areader):
+            return
+        # 旧设备的读取器要停掉，它的状态随之变为未连接
+        # 注意：**不停掉旧设备的读取器** —— 各设备独立保持连接，
+        # 否则"切到 2 号，1 号就断线"会让人以为设备掉线了。
+        old = self._dev()
+        self.host = host
+        self.ip.set_text(host)
+        self._reset_view_state()
+        self._sync_rec_button()
+        # 列表只负责"切换显示 + 状态展示"，绝不自动联网：
+        # 需要接收时由用户显式点「连接」
+        dev = self._dev(host)
+        self._update_device_list()
+        self._sync_device_combo(host)
+        self.btn_conn.set_sensitive(not bool(dev.get("vreader")))
+        self.btn_disc.set_sensitive(bool(dev.get("vreader")))
+        if dev.get("vreader"):
+            self._show_video_hint("正在切换…")
+            self.set_status(f"已切换到 {host}")
+        else:
+            self._show_video_hint("未连接 · 点「连接」开始")
+            self.set_status(f"已切换到 {host}（未连接，点「连接」开始接收）")
+
+    def _reset_view_state(self):
+        """切换设备时彻底清空显示，避免残留上一台设备的画面"""
+        try:
+            # 视频：换成纯黑帧，避免旧画面残留造成混淆
+            blank = np.zeros((540, 960, 3), dtype=np.uint8)
+            self.video.set_from_pixbuf(np_to_pixbuf(blank))
+        except Exception:
+            pass
+        try:
+            self.wave.reset()
+            self.waterfall.clear()
+            self.compass.trail.clear()
+            self.compass.clear_fix()
+            self._audio_q.clear()
+            self._newest_frame = None
+            self._lbuf = None
+            self._env = None
+            self._env_base = None
+            self._last_rms = None
+            self._last_event = None
+            self.locator.srp[:] = 0
+            self.compass.clear_fix()
+            self.compass.trail.clear()
+            self.compass.set_mic_levels(np.full(AUDIO_CH, -120.0))
+            self.levels.update_db(np.full(AUDIO_CH, -120.0))
+            self.lbl_az.set_markup(
+                "<span font_family='Monospace' weight='bold' size='large'>--.-°</span>"
+                " 待事件　<span size='small' color='#8b93a3'>等待声音触发</span>")
+            self._show_video_hint("正在连接…")
+            self._hint_visible = True
+        except Exception:
+            pass
+
+    # ---------------- 局域网设备发现 ----------------
+    @staticmethod
+    def _local_subnets():
+        """从本机路由表推断要扫描的网段（/24）"""
+        nets = set()
+        try:
+            out = subprocess.run(["ip", "-o", "-4", "addr"], timeout=3,
+                                 capture_output=True, text=True).stdout
+            for line in out.splitlines():
+                for tok in line.split():
+                    if "/" in tok and tok.count(".") == 3:
+                        ip, plen = tok.split("/")
+                        if ip.startswith("127.") or ip.startswith("169.254."):
+                            continue
+                        if plen == "24":
+                            nets.add(".".join(ip.split(".")[:3]))
+        except Exception:
+            pass
+        if not nets:
+            nets.add("192.168.2")
+        return sorted(nets)
+
+    def scan_devices(self):
+        """并发扫描网段，同时开放 554(video) 和 8554(audio) 的判定为本设备"""
+        self.btn_scan.set_sensitive(False)
+        self.btn_scan.set_label("扫描中…")
+        self.set_status("正在扫描局域网…")
+
+        def worker():
+            import socket
+            from concurrent.futures import ThreadPoolExecutor
+            nets = self._local_subnets()
+            found = []
+
+            def probe(ip):
+                ok = 0
+                for port in (554, 8554):
+                    sk = socket.socket()
+                    sk.settimeout(0.25)
+                    try:
+                        if sk.connect_ex((ip, port)) == 0:
+                            ok += 1
+                    except Exception:
+                        pass
+                    finally:
+                        sk.close()
+                return ip if ok == 2 else None
+
+            ips = []
+            for n in nets:
+                ips += [f"{n}.{i}" for i in range(1, 255)]
+            with ThreadPoolExecutor(max_workers=96) as ex:
+                for r in ex.map(probe, ips):
+                    if r:
+                        found.append(r)
+
+            def done():
+                self._combo_guard = True
+                self.cmb_dev.remove_all()
+                for ip in found:
+                    self.cmb_dev.append_text(ip)
+                if found:
+                    self.cmb_dev.set_active(0)
+                    self.set_status(f"发现 {len(found)} 台设备：{', '.join(found)}")
+                    self.log_line(
+                        f"{time.strftime('%H:%M:%S')}  -- 发现 {len(found)} 台"
+                        f"设备：{', '.join(found)}")
+                else:
+                    self.set_status("未发现设备（检查网线 / IP 网段）")
+                self._combo_guard = False
+                # 扫描结束后让下拉框仍指向当前设备
+                self._sync_device_combo(self.host)
+                self.btn_scan.set_sensitive(True)
+                self.btn_scan.set_label("发现")
+                return False
+
+            GLib.idle_add(done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_row_activated(self, lb, row):
+        host = getattr(row, "host", None)
+        if host:
+            self.switch_to(host)
+
+    def _on_pick_device(self, cmb):
+        """下拉框选中某台设备 = 切换到那台（改 host / 按钮状态 / 清空画面）"""
+        if getattr(self, "_combo_guard", False):
+            return
+        txt = cmb.get_active_text()
+        if not txt:
+            return
+        self.ip.set_text(txt)
+        if txt != self.host:
+            self.switch_to(txt)
+
+    def _sync_device_combo(self, host):
+        """让下拉框选中与当前设备一致（切换设备后调用）"""
+        if not host:
+            return
+        try:
+            self._combo_guard = True
+            model = self.cmb_dev.get_model()
+            if model:
+                for i, row in enumerate(model):
+                    if row[0] == host:
+                        self.cmb_dev.set_active(i)
+                        break
+                else:
+                    # 不在列表里就补进去
+                    self.cmb_dev.append_text(host)
+                    self.cmb_dev.set_active(len(model))
+        except Exception:
+            pass
+        finally:
+            self._combo_guard = False
+
+    def connect(self):
+        cur = self._dev()
+        if cur.get("vreader") or cur.get("areader"):
+            self.set_status(f"{self.host} 已连接")
+            return
+        host = self.ip.get_text().strip() or "192.168.2.2"
+        self.host = host
+        self.settings["last_host"] = host
+        try:
+            save_settings(self.settings)
+        except Exception:
+            pass
+        n = kill_orphan_streams(host)
+        if n:
+            self.set_status(f"已清理 {n} 个残留拉流进程")
+            time.sleep(0.5)
+        scale = self.settings.get("display_scale", "fit")
+        if scale and "x" in str(scale):
+            tw, th = str(scale).split("x")
+            target = (int(tw), int(th))
+        else:
+            alloc = self.video.get_allocation()
+            if alloc.width > 200 and alloc.height > 120:
+                target = (alloc.width, alloc.height)
+            else:
+                target = (960, 540)
+        dev0 = self._dev(host)
+        dev0["epoch"] = dev0.get("epoch", 0) + 1
+        ep = dev0["epoch"]
+        self.vreader = VideoReader(f"rtsp://{host}/live",
+                                   lambda pb, h=host, e=ep: self.on_frame(pb, h, e),
+                                   self.set_status, target=target)
+
+        # 选择解码模式：本地合成码流探测（0.4~1 秒，不占用设备的 RTSP 客户端）
+        hmode = self.settings.get("hwaccel", "auto")
+        if hmode in ("auto", "vaapi"):
+            cached = self.settings.get("hwmode_last", "")
+            if cached in ("vaapi", "vaapi_sw"):
+                self.vreader.hwmode = cached
+                self.log_line(
+                    f"{time.strftime('%H:%M:%S')}  -- 解码模式（缓存）："
+                    f"{'全GPU' if cached == 'vaapi' else 'GPU解码+软缩放'}")
+            else:
+                self.set_status("正在检测硬件解码…")
+                mode = probe_vaapi()
+                self.vreader.hwmode = mode
+                if mode != "sw":
+                    self.settings["hwmode_last"] = mode
+                    try:
+                        save_settings(self.settings)
+                    except Exception:
+                        pass
+                self.log_line(
+                    f"{time.strftime('%H:%M:%S')}  -- "
+                    + {"vaapi": "硬件解码可用：全 GPU 管线",
+                       "vaapi_sw": "硬件解码可用：GPU 解码 + CPU 缩放",
+                       }.get(mode, "硬件解码不可用，使用软件解码"))
+        else:
+            self.vreader.hwmode = "sw"
+        self.set_status(self.vreader.hwmode)
+
+        self.vreader.on_fps = self.on_fps
+        self.vreader.on_video_info = self.on_video_info
+        self._apply_transport()
+        dev0["vreader"] = self.vreader
+        self.vreader.start()
+        self.areader = AudioReader(f"rtsp://{host}:8554/live",
+                                   lambda a, h=host, e=ep: self.on_audio(a, h, e),
+                                   self.set_status)
+        dev0["areader"] = self.areader
+        self.areader.start()
+        self.btn_conn.set_sensitive(False)
+        self.btn_disc.set_sensitive(True)
+        dev = self._dev(host)
+        dev["connected"] = True
+        dev["status"] = "连接中"
+        self._update_device_list()
+        # 多设备同时解码会叠加 CPU，超过 2 台给个提示
+        n_live = sum(1 for x in self.devices.values() if x.get("vreader"))
+        if n_live > 2:
+            self.log_line(
+                f"{time.strftime('%H:%M:%S')}  -- 注意：已有 {n_live} 台设备在"
+                f"同时解码，CPU 会随数量线性上升")
+        self._sync_rec_button()
+
+    def disconnect(self):
+        d = self._dev()
+        d["epoch"] = d.get("epoch", 0) + 1     # 作废该设备的回调
+        self._show_video_hint("已断开")
+        if d.get("vreader"):
+            d["vreader"].stop(); d["vreader"] = None
+        if d.get("areader"):
+            d["areader"].stop(); d["areader"] = None
+        self.vreader = None
+        self.areader = None
+        self.btn_conn.set_sensitive(True)
+        self.btn_disc.set_sensitive(False)
+        dev = self._dev()
+        dev["connected"] = False
+        dev["status"] = "已断开"
+        self._update_device_list()
+        self.set_status("已断开")
+
+    # ---- 录制 ----
+    def _outdir(self, sub):
+        root = self.settings.get("out_root") or OUT_ROOT
+        d = os.path.join(root, sub)
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _stamp(self):
+        return time.strftime("%Y%m%d_%H%M%S")
+
+    def record_gb_per_hour(self):
+        """按当前音频编码估算每小时占用（FLAC 约为 PCM 的 51%）"""
+        a = EST_AUDIO_MBPS
+        if self.settings.get("rec_audio_codec", "flac") == "flac":
+            a *= 0.51
+        return (EST_VIDEO_MBPS + a) * 3600 / 8 / 1000
+
+    def record_free_gb(self, path=None):
+        try:
+            st = os.statvfs(path or self.out_root)
+            return st.f_bavail * st.f_frsize / (1024 ** 3)
+        except Exception:
+            return 0.0
+
+    # ---------------- 录制：音频后台无损压缩 ----------------
+    # WAV 直接录，时长元数据正确；每段录完后在后台转成 FLAC（无损，省 ~49%）。
+    def _compress_closed_segments(self, d, final=False):
+        """把已写完的 seg_NNN.wav 转成 seg_NNN.flac 并删除 wav，返回剩余数量"""
+        import glob
+        files = sorted(glob.glob(os.path.join(d, "seg_*.wav")))
+        if not files:
+            return 0
+        idxs = []
+        for f in files:
+            b = os.path.basename(f)
+            try:
+                idxs.append(int(b[4:7]))
+            except Exception:
+                idxs.append(0)
+        last = max(idxs) if idxs else 0
+        for f, i in zip(files, idxs):
+            if not final and i >= last:      # 最后一段还在写
+                continue
+            flac = f[:-4] + ".flac"
+            if os.path.exists(flac):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+                continue
+            try:
+                r = subprocess.run(
+                    ["ffmpeg", "-nostdin", "-y", "-loglevel", "error",
+                     "-i", f, "-c:a", "flac", "-compression_level", "5", flac],
+                    timeout=1800)
+                if r.returncode == 0 and os.path.exists(flac):
+                    os.remove(f)
+            except Exception:
+                pass
+        return len(glob.glob(os.path.join(d, "seg_*.wav")))
+
+    def _flac_loop(self, d):
+        while True:
+            time.sleep(4)
+            left = self._compress_closed_segments(d, final=not self._rec_active)
+            if not self._rec_active and left == 0:
+                self.log_line(
+                    f"{time.strftime('%H:%M:%S')}  -- 音频已全部转为 FLAC（无损）")
+                break
+
+    def _sync_rec_button(self):
+        """让录制按钮（状态+文字）反映"当前设备"是否正在录制"""
+        try:
+            active = bool(self._dev().get("rec_active"))
+            if self.btn_recv.get_active() != active:
+                self._rec_guard = True
+                self.btn_recv.set_active(active)
+                self._rec_guard = False
+            # 标签必须显式更新：set_active 触发的 toggled 被 _rec_guard 挡掉了，
+            # 不会走到 toggle_rec_video 里改文字
+            self.btn_recv.set_label("停止录像" if active else "录制音视频")
+        except Exception:
+            pass
+
+    def toggle_rec_video(self, btn):
+        """
+        音视频统一录制：同一个 ffmpeg 进程同时拉视频(554)和 8 轨音频(8554)，
+        保证起止时间对齐；按设定时长分段，每段生成同名的 .mp4 + .wav。
+
+        每台设备独立录制：切到别的设备录制不会影响这台，后台继续跑。
+        """
+        if getattr(self, "_rec_guard", False):
+            return
+        dev = self._dev()
+        if btn.get_active():
+            seg_min = max(1, int(self.settings.get("rec_segment_min", 60)))
+            total_h = float(self.settings.get("rec_total_hours", 0) or 0)
+            d = os.path.join(self._outdir("recordings"),
+                             f"dev_{dev['host']}", self._stamp())
+            os.makedirs(d, exist_ok=True)
+            seg = seg_min * 60
+
+            # 注意两个坑（实测踩过）：
+            # 1) 音频服务器不支持 RTSP over TCP，音频输入必须用 UDP；
+            #    视频用 TCP，录制容不得丢包。
+            # 2) 分段 muxer 对"先视频后音频"的组合会失效（视频不分段），
+            #    必须把音频输出放前面、视频输出放后面，两者才能都正常分段。
+            audio_map = "".join(f"[0:a:{i}]" for i in range(AUDIO_CH))
+            lim = ["-t", str(int(total_h * 3600))] if total_h > 0 else []
+            cmd = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error",
+                   "-rtsp_transport", "udp", "-buffer_size", "1048576",
+                   "-i", f"rtsp://{self.host}:8554/live",
+                   "-rtsp_transport", "tcp", "-i", f"rtsp://{self.host}/live",
+                   # ① 音频：8 轨合并成 8 声道 WAV，分段
+                   "-filter_complex",
+                   f"{audio_map}amerge=inputs={AUDIO_CH}[a]",
+                   "-map", "[a]", "-c:a", "pcm_s16le",
+                   "-f", "segment", "-segment_time", str(seg),
+                   "-reset_timestamps", "1"] + lim + [
+                   os.path.join(d, "seg_%03d.wav"),
+                   # ② 视频：流拷贝（零画质损失），同名分段
+                   "-map", "1:v:0", "-c:v", "copy",
+                   "-f", "segment", "-segment_time", str(seg),
+                   "-reset_timestamps", "1"] + lim + [
+                   os.path.join(d, "seg_%03d.mp4")]
+
+            dev["rec"] = subprocess.Popen(cmd)
+            dev["rec_dir"] = d
+            dev["rec_active"] = True
+            self.recs.append(dev["rec"])
+            self._rec_path = d
+            self._rec_active = True
+            self._update_device_list()
+            if self.settings.get("rec_audio_codec", "flac") == "flac":
+                threading.Thread(target=self._flac_loop, args=(d,),
+                                 daemon=True).start()
+            btn.set_label("停止录像")
+            est = self.record_gb_per_hour()
+            self.set_status(
+                f"● 录制中（{seg_min}分钟分段，约 {est:.1f} GB/小时）→ {d}")
+            self.log_line(
+                f"{time.strftime('%H:%M:%S')}  -- 开始录制：{seg_min}分钟/段，"
+                f"{'不限时长' if total_h <= 0 else f'{total_h:g} 小时'}，"
+                f"约 {est:.1f} GB/小时")
+        else:
+            self._kill_dev_rec(dev)
+            dev["rec_active"] = False
+            self._update_device_list()
+            btn.set_label("录制音视频")
+            self.set_status(f"✓ 已保存 {getattr(self, '_rec_path', '')}")
+            self.log_line(
+                f"{time.strftime('%H:%M:%S')}  -- 停止录制：{getattr(self, '_rec_path', '')}")
+
+    def toggle_rec_audio(self, btn):
+        if btn.get_active():
+            d = self._outdir(os.path.join("audio", f"audio_{self._stamp()}"))
+            outs = []
+            for i in range(AUDIO_CH):
+                outs += ["-map", f"0:a:{i}", os.path.join(d, f"ch{i}.wav")]
+            self.recs.append(subprocess.Popen(
+                ["ffmpeg", "-nostdin", "-y", "-loglevel", "error",
+                 "-rtsp_transport", "udp",
+                 "-i", f"rtsp://{self.host}:8554/live"] + outs))
+            self._rec_path = d
+            btn.set_label("停止录音")
+            self.set_status(f"● 录音中 → {d}")
+        else:
+            self._kill_recs()
+            btn.set_label("录 8 轨音频")
+            self.set_status(f"✓ 已保存 {getattr(self, '_rec_path', '')}")
+
+    def _kill_dev_rec(self, dev):
+        """只停止某台设备的录制"""
+        p = dev.get("rec")
+        if not p:
+            return
+        try:
+            p.send_signal(signal.SIGINT)
+            p.wait(timeout=3)
+        except Exception:
+            try:
+                p.kill()
+            except Exception:
+                pass
+        dev["rec"] = None
+        try:
+            self.recs.remove(p)
+        except Exception:
+            pass
+
+    def _kill_recs(self):
+        # SIGINT 让 ffmpeg 正常收尾（写完 mp4 的 moov / wav 的头部）
+        for p in self.recs:
+            try:
+                p.send_signal(signal.SIGINT)
+            except Exception:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+        for p in self.recs:
+            try:
+                p.wait(timeout=3)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+        self.recs.clear()
+
+    AZ_WIN = 20          # 平滑窗口（只保留通过置信度门限的样本）
+    AZ_MIN_CONF = 1.8    # 低于此置信度：不更新方位，保持上一次稳定值
+    AZ_HYST = 8.0        # 迟滞：变化小于该角度不改显示
+    AZ_HOLD_SEC = 1.5    # 超过这么久没有可靠样本 -> 判定"无明确声源"，隐藏指针
+
+    LOUD_DB = -45.0      # 超过这个电平认为"确实有人在发声"（正常说话即可触发）
+    IMPULSE_DB = -30.0   # 超过这个电平视为瞬态事件（敲击/拍手），直接跳到该方向
+
+    def _level_db(self):
+        r = getattr(self, "_last_rms", None)
+        if r is None:
+            return -120.0
+        try:
+            return float(20.0 * np.log10(float(np.max(r)) + 1e-12))
+        except Exception:
+            return -120.0
+
+    def _smooth_azimuth(self, peak):
+        """
+        低信噪比下的稳定策略：
+
+        1. 只把 conf >= AZ_MIN_CONF 的样本放进平滑窗口；
+        2. 对窗口做置信度加权圆周平均（避免 0/360 跳变）；
+        3. 迟滞，小于 AZ_HYST 的变化不改显示；
+        4. 长时间没有可靠样本就保持旧值，并标记 stale，
+           而不是让指针乱转 —— 安静房间里本来就没有声源。
+        """
+        az, conf = peak
+        now = time.time()
+        hist = getattr(self, "_az_hist", None)
+        if hist is None:
+            hist = self._az_hist = collections.deque(maxlen=self.AZ_WIN)
+
+        # 有明确声音时放宽门限：麦克风电平已经很高，说明确实有源，
+        # 此时即使 SRP 置信度一般也应该跟随，否则会出现"点亮了指针不动"
+        level_db = self._level_db()
+        loud = level_db > self.LOUD_DB
+        # 强瞬态（拍手/敲击）：直接跳到该方向，不做平滑也不看置信度。
+        # 敲击只有 20ms，SRP 置信度天然偏低，但它确实是一次明确的声音事件。
+        # 注意：敲板子时声音经 PCB 固体传导，8 个麦克风几乎同时收到，
+        # TDOA≈0，方向不可解。这种瞬态必须要求足够置信度，
+        # 否则会让指针跳到随机方向，比不动更误导。
+        impulse = level_db > self.IMPULSE_DB and conf >= 1.60
+
+        gate = 1.10 if loud else self.AZ_MIN_CONF
+        if impulse:
+            gate = 0.0
+
+        if conf >= gate:
+            hist.append((az, conf))
+            self._last_good_t = now
+            if impulse:
+                hist.clear()
+                hist.append((az, conf))
+                self._disp_az_target = az
+                self._stale = False
+                return (az, float(conf))
+            if loud:
+                # 大声时窗口缩短，响应更快
+                while len(hist) > 8:
+                    hist.popleft()
+
+        if not hist:
+            self._stale = True
+            return peak
+
+        w = np.array([max(0.0, c - 1.0) for _, c in hist], dtype=np.float64)
+        if w.sum() <= 0:
+            w = np.ones(len(hist))
+        ang = np.deg2rad([a for a, _ in hist])
+        mean = np.rad2deg(np.arctan2((w * np.sin(ang)).sum(),
+                                     (w * np.cos(ang)).sum())) % 360.0
+        smooth_conf = float(np.average([c for _, c in hist], weights=w))
+
+        disp = getattr(self, "_disp_az_target", None)
+        if disp is not None:
+            d = abs((mean - disp + 180.0) % 360.0 - 180.0)
+            if d < self.AZ_HYST:
+                mean = disp
+            elif loud and d > 25.0:
+                # 明显换方向了，直接跟过去，不被平滑拖住
+                mean = 0.5 * mean + 0.5 * az
+        self._disp_az_target = mean
+
+        self._stale = (now - getattr(self, "_last_good_t", 0.0)) > self.AZ_HOLD_SEC
+        return (mean, smooth_conf)
+
+    def _update_cal_label(self):
+        """把校准状态显示在界面上，让"是否已校准"一目了然"""
+        cm = self.settings.get("channel_map")
+        ts = self.settings.get("calibrated_at", "")
+        if not cm or sorted(cm) != list(range(AUDIO_CH)):
+            self.lbl_cal.set_markup(
+                "<span size='small' color='#e0803a'>未校准 · 请点「校准」</span>")
+            return
+        identity = cm == list(range(AUDIO_CH))
+        mapping = " ".join(f"{i+1}→{cm[i]+1}" for i in range(AUDIO_CH))
+        tag = "默认顺序" if identity else mapping
+        when = f"　{ts}" if ts else ""
+        self.lbl_cal.set_markup(
+            f"<span size='small' color='#4ade80'>已校准</span>"
+            f"　<span size='small' color='#8b93a3'>{tag}{when}</span>")
+
+    def _reprobe_bg(self, host):
+        """后台探测硬解能力；发现更优模式就热切换到正在运行的拉流"""
+        try:
+            mode = probe_vaapi(f"rtsp://{host}/live")
+        except Exception:
+            return
+        if mode != "sw" and mode != self.settings.get("hwmode_last"):
+            self.settings["hwmode_last"] = mode
+            try:
+                save_settings(self.settings)
+            except Exception:
+                pass
+        v = getattr(self, "vreader", None)
+        if v is not None and mode != v.hwmode and mode != "sw":
+            v.hwmode = mode
+            v._switching = True
+            GLib.idle_add(self._restart_video)
+            self.log_line(
+                f"{time.strftime('%H:%M:%S')}  -- 切换到"
+                f"{'全GPU' if mode == 'vaapi' else 'GPU解码+软缩放'}解码")
+
+    def _restart_video(self):
+        """让重连循环用新的解码模式重新起 ffmpeg（热切换，不掉界面）"""
+        try:
+            if self.vreader and self.vreader.proc:
+                self.vreader.proc.kill()
+        except Exception:
+            pass
+        return False
+
+    def _apply_transport(self):
+        tp = self.settings.get("transport", "udp")
+        if tp not in ("udp", "tcp"):
+            tp = "udp"
+        for r in (getattr(self, "vreader", None), getattr(self, "areader", None)):
+            if r is not None:
+                r.transport = tp
+
+    def _apply_algorithm(self):
+        """切换定位算法（热切换，无需重启）"""
+        alg = self.settings.get("algorithm", "srp")
+        if alg not in ("srp", "music", "mvdr", "fusion"):
+            alg = "srp"
+        self.locator.method = alg
+        self.locator.srp[:] = 0
+
+    def _apply_event_sens(self):
+        """事件检测灵敏度：越灵敏越容易触发远距离声音，但误报也更多"""
+        table = {
+            "low":    (3.0, 0.0015, 1.2),
+            "medium": (2.2, 0.0008, 2.2),
+            "high":   (1.7, 0.0004, 1.8),
+        }
+        r, lvl, rise = table.get(self.settings.get("event_sens", "medium"),
+                                 table["medium"])
+        self.detector.START_RATIO = r
+        self.detector.MIN_LEVEL = lvl
+        self.detector.RISE_RATIO = rise
+
+    def _apply_sensitivity(self):
+        table = {"low": 2.2, "medium": 1.8, "high": 1.5}
+        self.AZ_MIN_CONF = table.get(self.settings.get("sensitivity", "medium"), 1.8)
+
+    def _localize_event(self):
+        """
+        对刚结束的事件做定位。
+
+        只取事件的起音段（前 ~200ms）—— 起音是宽带的，
+        而咳嗽/犬吠的持续段能量集中在 2kHz 以下，
+        带宽不足会让 9cm 孔径分辨不出方向。
+        """
+        if len(self._ring) < 8:
+            return
+        buf = np.concatenate(list(self._ring), axis=1)   # (8, N)
+        # 关键：从**起音**开始取窗口，而不是从末尾。
+        # 咳嗽/犬吠的起音是宽带的（含高频气流成分），
+        # 持续段能量集中在 2kHz 以下，带宽不足会让 9cm 孔径分辨不出方向。
+        win = min(buf.shape[1], int(0.25 * AUDIO_RATE))
+        end_pos = getattr(self, "_ev_start_pos", len(self._ring))
+        end_samples = min(buf.shape[1], end_pos * 480)
+        start_samples = max(0, end_samples - win)
+        seg = buf[:, start_samples:min(buf.shape[1], start_samples + win + 480)]
+        if seg.shape[1] < win:
+            seg = buf[:, -win:]
+
+        nfft = self.locator.nfft
+        if seg.shape[1] < nfft:
+            return
+
+        # 把整段起音窗口切成多个 1024 点帧，一次性交给定位器：
+        # - SRP：逐帧相关后相加（非相干累积）
+        # - MUSIC/MVDR：这些帧用于估计 8×8 协方差矩阵（帧越多越稳）
+        step = max(1, (seg.shape[1] - nfft) // 8)
+        chunks = []
+        for off in range(0, max(1, seg.shape[1] - nfft + 1), step):
+            c = seg[:, off:off + nfft]
+            if c.shape[1] < nfft:
+                break
+            chunks.append(c)
+        if not chunks:
+            return
+        res = self.locator.process_window(chunks)
+        ests = [res[0]] if res and res[0][1] >= 1.15 else []
+        if not ests:
+            print(f"[event] 检测到事件但定位失败（起始段带宽不足？）",
+                  flush=True)
+            self.lbl_az.set_markup(
+                "<span font_family='Monospace' weight='bold' size='large'>--.-°</span> 事件"
+                "　<span size='small' color='#8b93a3'>窄带声音·无法定向</span>")
+            self._last_event = None
+            return
+
+        az, conf = ests[0]
+        peak_db = 20.0 * np.log10(self.detector.peak + 1e-12)
+
+        self._event_no += 1
+        self._last_event = (time.time(), az, conf, peak_db)
+        print(f"[event] #{self._event_no} az={az:.1f} conf={conf:.2f} "
+              f"peak={peak_db:.0f}dBFS", flush=True)
+        self.log_line(f"{time.strftime('%H:%M:%S')}  "
+                      f"{az:5.1f}° {dir_name(az)}  "
+                      f"c{conf:.1f}  {peak_db:4.0f}dB")
+
+        # 事件定位只更新一次指针，之后保持 4 秒
+        self.compass.set_azimuth(az, conf, [(az, conf)], valid=True)
+        self.waterfall.push(az, conf)
+        self._maybe_log_csv(az, conf)
+
+        self.lbl_az.set_markup(
+            f"<span font_family='Monospace' weight='bold' size='large'>{az:05.1f}°</span> {dir_name(az)}"
+            f"　<span size='small' color='#8b93a3'>事件#{self._event_no}"
+            f"  置信{conf:.1f}  {peak_db:.0f}dB</span>")
+
+    def _maybe_log_csv(self, az, conf):
+        if not self.settings.get("log_csv"):
+            return
+        now = time.time()
+        if now - getattr(self, "_csv_t", 0.0) < 0.5:
+            return
+        self._csv_t = now
+        if getattr(self, "_csv_fp", None) is None:
+            d = self._outdir("logs")
+            path = os.path.join(d, f"azimuth_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+            try:
+                self._csv_fp = open(path, "w", encoding="utf-8")
+                self._csv_fp.write("time,azimuth_deg,direction,confidence\n")
+                self._csv_path = path
+            except Exception:
+                self.settings["log_csv"] = False
+                return
+        try:
+            self._csv_fp.write(
+                f"{time.strftime('%H:%M:%S')},{az:.1f},{dir_name(az)},{conf:.2f}\n")
+            self._csv_fp.flush()
+        except Exception:
+            pass
+
+    def open_calibration(self, *_):
+        # 对话框可能被 keep_above 主窗口盖住
+        self.win.set_keep_above(False)
+        dlg = CalibDialog(self)
+        dlg.connect("response", lambda d, r: (d.destroy(),
+                                              self.win.set_keep_above(True)))
+        dlg.show()
+
+    def open_settings(self, *_):
+        # 对话框可能被 keep_above 的主窗口盖住，先临时取消置顶
+        self.win.set_keep_above(False)
+        try:
+            dlg = SettingsDialog(self.win, self.settings)
+            resp = dlg.run()
+            if resp == Gtk.ResponseType.OK:
+                self.settings.update(dlg.result())
+                if save_settings(self.settings):
+                    self.set_status(f"✓ 设置已保存到 {CONFIG_PATH}")
+                else:
+                    self.set_status("设置保存失败（仅本次生效）")
+                self.levels.floor = self.settings.get("meter_floor", -60)
+                self.locator.angle_offset = float(self.settings.get("angle_offset", 0.0))
+                self._apply_sensitivity()
+                self._apply_event_sens()
+                self._apply_algorithm()
+                self._apply_transport()
+            dlg.destroy()
+        finally:
+            self.win.set_keep_above(True)
+            self.win.present()
+
+    def snapshot(self, *_):
+        d = self._outdir("snapshots")
+        path = os.path.join(d, f"snap_{self._stamp()}.png")
+
+        if not self.settings.get("snap_full_res", True):
+            pb = getattr(self, "_last_pb", None)
+            if pb is None:
+                self.set_status("还没有画面")
+                return
+            try:
+                pb.savev(path, "png", [], [])
+                self.set_status(f"✓ 截图已保存（当前画面） {path}")
+            except Exception as e:
+                self.set_status(f"截图失败: {e}")
+            return
+
+        # 原始分辨率：另开一个短连接抓一帧（设备端支持多客户端，实测不影响主画面）
+        self.set_status("正在抓取原始分辨率帧…")
+
+        def worker():
+            cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+                   "-rtsp_transport", "tcp", "-i", f"rtsp://{self.host}/live",
+                   "-frames:v", "1", path]
+            try:
+                subprocess.run(cmd, timeout=25, check=False)
+                if os.path.exists(path) and os.path.getsize(path) > 1000:
+                    GLib.idle_add(self.set_status, f"✓ 截图已保存 {path}")
+                else:
+                    GLib.idle_add(self.set_status, "截图失败（未取到帧）")
+            except Exception as e:
+                GLib.idle_add(self.set_status, f"截图失败: {e}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def quit(self, *_):
+        self._kill_recs()
+        self.disconnect()
+        Gtk.main_quit()
+
+
+
+def main():
+    host = sys.argv[1] if len(sys.argv) > 1 else "192.168.2.2"
+    app = App(host)
+    # 不自动连接：窗口先出来，由用户点「连接」再拉流。
+    # 但启动 1 秒后自动扫一次网段，把设备列进下拉框（多设备时不用手输 IP）
+    if os.environ.get("TVMON_NO_SCAN") != "1":
+        GLib.timeout_add(1000, lambda: (app.scan_devices(), False)[1])
+    # 需要自动连时设置环境变量 TVMON_AUTOCONNECT=1 即可。
+    if os.environ.get("TVMON_AUTOCONNECT") == "1":
+        GLib.timeout_add(300, lambda: (app.connect(), False)[1])
+
+    if os.environ.get("TVMON_SELFTEST"):
+        def _selftest():
+            print("[selftest] 截图…", flush=True)
+            app.snapshot()
+            print("[selftest] 开始录像…", flush=True)
+            app.btn_recv.set_active(True)
+            GLib.timeout_add(3000, _selftest_stop)
+            return False
+
+        def _selftest_stop():
+            print("[selftest] 停止录像…", flush=True)
+            app.btn_recv.set_active(False)
+            GLib.timeout_add(1500, lambda: (print("[selftest] 完成", flush=True),
+                                            Gtk.main_quit())[1])
+            return False
+
+        GLib.timeout_add(9000, _selftest)
+
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

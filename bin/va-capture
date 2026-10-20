@@ -1,0 +1,29 @@
+#!/bin/sh
+# VA Capture 启动器
+# 用法: va-capture [设备IP]
+#
+# 解释器选择：优先 $VA_CAPTURE_PYTHON，其次系统 python3，
+# 再退回开发用的 venv —— 只要该解释器同时具备 gi(GTK3) 和 numpy。
+
+HERE=$(dirname "$(readlink -f "$0")")
+if [ -d "$HERE/../src/va_capture" ]; then
+    export PYTHONPATH="$HERE/../src${PYTHONPATH:+:$PYTHONPATH}"
+else
+    export PYTHONPATH="/usr/lib/va-capture${PYTHONPATH:+:$PYTHONPATH}"
+fi
+
+pick_python() {
+    for c in "$VA_CAPTURE_PYTHON" python3 /usr/bin/python3 \
+             "$HOME/Documents/deepseek-harness/default-workspace/gtk-venv/bin/python"; do
+        [ -n "$c" ] || continue
+        if [ -x "$c" ] || command -v "$c" >/dev/null 2>&1; then
+            if "$c" -c "import gi, numpy" >/dev/null 2>&1; then
+                echo "$c"
+                return 0
+            fi
+        fi
+    done
+    echo python3
+}
+
+exec "$(pick_python)" -m va_capture "$@"

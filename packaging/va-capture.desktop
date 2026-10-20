@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=VA Capture
+Name[zh_CN]=VA 监看台
+GenericName=Audio-Visual Monitor
+Comment=TinyVision 8-mic array + camera monitor with sound source localization
+Comment[zh_CN]=TinyVision 8 麦阵列 + 摄像头监看，含声源定位与多设备录制
+Exec=va-capture
+Icon=va-capture
+Terminal=false
+Categories=AudioVideo;Video;Audio;
+Keywords=camera;audio;rtsp;localization;tinvision;
+StartupNotify=true
