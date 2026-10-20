@@ -1,0 +1,36 @@
+name: build-deb
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建 .deb
+        run: ./packaging/build-deb.sh
+
+      - name: 上传为构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: build/*.deb
+
+      - name: 发布到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 额外做一份固定名字的副本，方便 README 里用
+          # releases/latest/download/va-capture_all.deb 永远指向最新版
+          cp build/va-capture_*_all.deb build/va-capture_all.deb
+          gh release create "${GITHUB_REF_NAME}" build/*.deb \
+            --title "VA Capture ${GITHUB_REF_NAME}" \
+            --generate-notes
