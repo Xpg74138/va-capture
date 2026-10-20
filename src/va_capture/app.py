@@ -15,6 +15,7 @@ from .readers import (VideoReader, AudioReader, probe_vaapi, probe_video,
 from .dsp import Locator, EventDetector, band_level
 from .widgets import Levels, Wave, Compass, Waterfall, np_to_pixbuf, draw_digit
 from .dialogs import CalibDialog, SettingsDialog
+from . import logging_util as flog
 
 class App:
     def __init__(self, host):
@@ -27,7 +28,15 @@ class App:
         self.recs = []
         self._rec_active = False
         self.fps = 0.0
+        flog.init()
         self.settings = load_settings()
+        flog.log("=" * 60)
+        flog.log(f"启动 va-capture {__import__('va_capture').__version__}")
+        flog.log(f"日志文件: {flog.log_path()}")
+        flog.log(f"设备: {host}  解码: {self.settings.get('hwaccel')}  "
+                 f"传输: {self.settings.get('transport')}  "
+                 f"算法: {self.settings.get('algorithm')}  "
+                 f"模式: {self.settings.get('mode')}")
         self.locator = Locator(angle_offset=float(self.settings.get("angle_offset", 0.0)))
         self.detector = EventDetector()
         self._ring = collections.deque(maxlen=200)    # 约 2 秒音频（容纳长事件起音）
@@ -71,7 +80,10 @@ class App:
 
         bar.pack_start(Gtk.Label(label="设备 IP:"), False, False, 0)
         self.ip = Gtk.Entry()
-        self.ip.set_text(self.settings.get("last_host", host))
+        # 输入框显示"当前设备"。以前这里用 settings 里的 last_host，
+        # 而 self.host 来自命令行参数，两者可能不一致 —— 于是点「连接」
+        # 会连到输入框里的旧地址而不是当前设备。现在统一以 host 为准。
+        self.ip.set_text(host)
         self.ip.set_width_chars(13)
         bar.pack_start(self.ip, False, False, 0)
 
@@ -276,7 +288,8 @@ class App:
 
     # ---- 状态 ----
     def log_line(self, text):
-        """向事件记录框追加一行（自动滚动、限制 200 行）"""
+        """向事件记录框追加一行（自动滚动、限制 200 行），并写入日志文件"""
+        flog.log(text.replace("\n", " "))
         try:
             self.log_buf.insert(self.log_buf.get_end_iter(), text + "\n")
             n = self.log_buf.get_line_count()
@@ -367,9 +380,24 @@ class App:
                 self._dt0 = now
             elif now - self._dt0 >= 1.0:
                 age = getattr(self, "_age", 0.0)
+                self._fps_last = self._dn / (now - self._dt0)
                 self.lbl_fps.set_text(
-                    f"显示 {self._dn / (now - self._dt0):.1f} fps"
+                    f"显示 {self._fps_last:.1f} fps"
                     f"   延迟 {age:.0f}ms")
+                # 每 60 秒往日志写一行运行状态，便于事后对时间线
+                if now - getattr(self, "_stat_t0", 0.0) >= 60.0:
+                    self._stat_t0 = now
+                    try:
+                        devs = " ".join(
+                            f"{h}[{d.get('status', '?')}"
+                            f"{',REC' if d.get('rec_active') else ''}]"
+                            for h, d in sorted(self.devices.items()))
+                        db = float(np.max(self.levels.db))
+                        flog.log(
+                            f"stats: fps={self._fps_last:.1f} lag={age:.0f}ms "
+                            f"audio={db:.1f}dB devs={devs or '-'}")
+                    except Exception:
+                        pass
                 self._dn = 0
                 self._dt0 = now
         return True
@@ -721,8 +749,13 @@ class App:
         if cur.get("vreader") or cur.get("areader"):
             self.set_status(f"{self.host} 已连接")
             return
-        host = self.ip.get_text().strip() or "192.168.2.2"
-        self.host = host
+        # 输入框被用户改过就用输入框，否则用当前选中的设备
+        typed = self.ip.get_text().strip()
+        host = typed or self.host
+        if host != self.host:
+            # 用户手填了新地址，视为切换设备
+            self.host = host
+            self.ip.set_text(host)
         self.settings["last_host"] = host
         try:
             save_settings(self.settings)
