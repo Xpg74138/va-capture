@@ -694,10 +694,9 @@ class App:
                     self.cmb_dev.append_text(ip)
                 if found:
                     self.cmb_dev.set_active(0)
+                    # 只调 set_status：它内部会写事件记录框和日志文件，
+                    # 再单独 log_line 会重复两遍
                     self.set_status(f"发现 {len(found)} 台设备：{', '.join(found)}")
-                    self.log_line(
-                        f"{time.strftime('%H:%M:%S')}  -- 发现 {len(found)} 台"
-                        f"设备：{', '.join(found)}")
                 else:
                     self.set_status("未发现设备（检查网线 / IP 网段）")
                 self._combo_guard = False
