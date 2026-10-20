@@ -68,5 +68,9 @@ PRE
 chmod 755 "$BUILD/DEBIAN/prerm"
 
 dpkg-deb --root-owner-group --build "$BUILD" "$ROOT/build/${PKG}.deb" >/dev/null
+# 再复制一份固定名字的，上传 Release 后可用
+#   .../releases/latest/download/va-capture_all.deb 永远指向最新版
+cp "$ROOT/build/${PKG}.deb" "$ROOT/build/va-capture_all.deb"
 echo "✓ 已生成: build/${PKG}.deb"
+echo "✓ 固定名: build/va-capture_all.deb"
 dpkg-deb --info "$ROOT/build/${PKG}.deb" | sed -n '1,12p'

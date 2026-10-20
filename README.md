@@ -66,10 +66,12 @@ sudo apt install python3-gi gir1.2-gtk-3.0 python3-numpy ffmpeg
 ### 方式三：自己打包 .deb
 
 ```bash
-./packaging/build-deb.sh        # 生成 build/va-capture_<版本>_all.deb
+./packaging/build-deb.sh
+# 生成 build/va-capture_<版本>_all.deb
+#      build/va-capture_all.deb（固定名，供 latest 链接使用）
 ```
 
-推 `v*` 标签时 GitHub Actions 会自动构建并发布到 Release。
+然后在 GitHub 网页端 *Releases → Draft a new release* 手动上传这两个文件即可。
 
 ## 使用
 
