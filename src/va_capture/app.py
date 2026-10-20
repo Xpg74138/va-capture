@@ -139,6 +139,9 @@ class App:
         _ov.add(self.video)
         _ov.add_overlay(self.video_hint)
         self._video_overlay = _ov
+        # 提示标签创建时就是可见的，标志必须先置 True，
+        # 否则显示循环里"收到第一帧就隐藏"的逻辑永远不会执行（旧版遗留 bug）
+        self._hint_visible = True
         paned.pack_start(_ov, True, True, 0)
 
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
