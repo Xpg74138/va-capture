@@ -3,6 +3,12 @@
 TinyVision V851se 设备的**音视频监看台**：实时预览摄像头画面与 8 通道麦克风阵列，
 内置声源定位（方位角）、事件触发检测，并支持多设备管理与独立录制。
 
+[![Release](https://img.shields.io/github/v/release/Xpg74138/va-capture?color=4ade80)](https://github.com/Xpg74138/va-capture/releases/latest)
+[![License](https://img.shields.io/github/license/Xpg74138/va-capture?color=38bdf8)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Ubuntu%2022.04%2B-orange)]()
+[![Python](https://img.shields.io/badge/python-3.8%2B-blue)]()
+
+
 ![界面](docs/screenshot.png)
 
 ## 功能
@@ -21,27 +27,48 @@ TinyVision V851se 设备的**音视频监看台**：实时预览摄像头画面�
 
 ### 方式一：.deb 包（推荐）
 
+从 [Releases](https://github.com/Xpg74138/va-capture/releases/latest) 下载最新版：
+
 ```bash
+# 下载并安装（自动装依赖）
+wget https://github.com/Xpg74138/va-capture/releases/latest/download/va-capture_1.0.0_all.deb
 sudo apt install ./va-capture_1.0.0_all.deb
 ```
 
-依赖会自动安装：`python3-gi`、`gir1.2-gtk-3.0`、`python3-numpy`、`ffmpeg`。
+> 用 `apt install ./xxx.deb` 而不是 `dpkg -i`，这样依赖会被自动安装。
+> 依赖：`python3-gi`、`gir1.2-gtk-3.0`、`python3-numpy`、`ffmpeg`
 
-安装后从应用菜单启动「VA Capture」，或命令行：
+安装后从**应用菜单**启动「VA Capture」，或命令行：
 
 ```bash
 va-capture 192.168.2.10      # 指定设备 IP（可省略）
 ```
 
+卸载：
+
+```bash
+sudo apt remove va-capture
+```
+
 ### 方式二：从源码运行
 
 ```bash
+git clone https://github.com/Xpg74138/va-capture.git
+cd va-capture
 sudo apt install python3-gi gir1.2-gtk-3.0 python3-numpy ffmpeg
 ./bin/va-capture 192.168.2.10
 ```
 
 若系统 Python 缺少 numpy，启动器会自动回退到开发用的 venv
 （可用 `VA_CAPTURE_PYTHON=/path/to/python` 指定）。
+
+### 方式三：自己打包 .deb
+
+```bash
+./packaging/build-deb.sh        # 生成 build/va-capture_<版本>_all.deb
+```
+
+推 `v*` 标签时 GitHub Actions 会自动构建并发布到 Release。
 
 ## 使用
 
