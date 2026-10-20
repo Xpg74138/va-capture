@@ -31,7 +31,8 @@ TinyVision V851se 设备的**音视频监看台**：实时预览摄像头画面�
 
 ```bash
 # 下载并安装（自动装依赖）
-wget https://github.com/Xpg74138/va-capture/releases/latest/download/va-capture_1.0.0_all.deb
+# 文件名固定为 va-capture_all.deb，始终指向最新版
+wget https://github.com/Xpg74138/va-capture/releases/latest/download/va-capture_all.deb
 sudo apt install ./va-capture_1.0.0_all.deb
 ```
 

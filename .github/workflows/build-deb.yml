@@ -28,6 +28,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # 额外做一份固定名字的副本，方便 README 里用
+          # releases/latest/download/va-capture_all.deb 永远指向最新版
+          cp build/va-capture_*_all.deb build/va-capture_all.deb
           gh release create "${GITHUB_REF_NAME}" build/*.deb \
             --title "VA Capture ${GITHUB_REF_NAME}" \
             --generate-notes
