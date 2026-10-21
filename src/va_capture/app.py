@@ -55,6 +55,8 @@ class App:
         if gc and len(gc) == AUDIO_CH:
             self.locator.gain_cal = np.array(gc, dtype=np.float32)
         self._lbuf = None
+        self._last_frame_t = 0.0
+        self._stalled = False
         self._video_lock = threading.Lock()
         self._newest_frame = None
         self._last_pb = None
@@ -379,9 +381,21 @@ class App:
             t_read, pb = item
             dcur["last_pb"] = pb          # 每台设备各自保存最后一帧
             self._age = (time.perf_counter() - t_read) * 1000.0
+            self._last_frame_t = time.time()
+            if getattr(self, "_stalled", False):
+                self._stalled = False
+                self._dev(h).get("vreader") and self.set_status(f"{self.host} 已恢复")
             if getattr(self, "_hint_visible", False):
                 self._hint_visible = False
                 self._hide_video_hint()
+        # 卡死检测：有读取器但 6 秒没新帧 → 标记信号中断（不再显示"已连接"骗人）
+        if dcur.get("vreader") and self._last_frame_t:
+            if not getattr(self, "_stalled", False) and \
+                    time.time() - self._last_frame_t > 6.0:
+                self._stalled = True
+                dcur["status"] = "信号中断"
+                self._update_device_list()
+                self.set_status(f"{self.host} 信号中断（{int(time.time()-self._last_frame_t)} 秒无画面）")
         pb_show = dcur.get("last_pb")
         if pb_show is not None:
             self.video.set_from_pixbuf(pb_show)

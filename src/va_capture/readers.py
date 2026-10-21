@@ -212,8 +212,10 @@ class VideoReader(threading.Thread):
             info = probe_video(self.url, timeout=5)
             if info:
                 break
-            GLib.idle_add(self.on_status,
-                          f"等待视频服务… ({attempt + 1})")
+            # 只报第 1/5/20/60 次，避免设备挂着时日志刷屏
+            if attempt + 1 in (1, 5, 20, 60):
+                GLib.idle_add(self.on_status,
+                              f"等待视频服务… ({attempt + 1})")
             # 间隔要够长：设备端每次 RTSP 会话都会占一块摄像头缓冲，
             # 频繁重连会把它撑到 OOM
             time.sleep(5)
@@ -334,7 +336,10 @@ class AudioReader(threading.Thread):
                 GLib.idle_add(self.on_status, f"音频异常: {e}")
             if self._stop.is_set():
                 break
-            GLib.idle_add(self.on_status, "音频断开，2 秒后重连…")
+            self._retry = getattr(self, "_retry", 0) + 1
+            if self._retry in (1, 5, 20) or self._retry % 60 == 0:
+                GLib.idle_add(
+                    self.on_status, f"音频断开，2 秒后重连… (第 {self._retry} 次)")
             time.sleep(2)
 
     def _run_once(self):
@@ -355,6 +360,7 @@ class AudioReader(threading.Thread):
             GLib.idle_add(self.on_status, f"音频启动失败: {e}")
             return
 
+        self._retry = 0
         GLib.idle_add(self.on_status, "8 轨音频已连接")
 
         while not self._stop.is_set():
