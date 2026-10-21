@@ -383,8 +383,11 @@ class App:
             self._age = (time.perf_counter() - t_read) * 1000.0
             self._last_frame_t = time.time()
             if getattr(self, "_stalled", False):
+                # 画面恢复：把状态从「信号中断」改回来
                 self._stalled = False
-                self._dev(h).get("vreader") and self.set_status(f"{self.host} 已恢复")
+                dcur["status"] = "已连接"
+                GLib.idle_add(self._update_device_list)
+                self.set_status(f"{self.host} 已恢复")
             if getattr(self, "_hint_visible", False):
                 self._hint_visible = False
                 self._hide_video_hint()
