@@ -1006,8 +1006,12 @@ class App:
             old = dev["vreader"]
             old.stop()
             time.sleep(0.3)
-            dev["epoch"] = dev.get("epoch", 0) + 1
-            ep = dev["epoch"]
+            # 注意：这里**不能**递增 dev["epoch"]。
+            # 世代号是"整台设备"的，音频读取器还活着并带着旧纪元号，
+            # 一旦递增，on_audio 会把它的数据全部当作旧数据丢弃 ——
+            # 表现就是「一点录制，音频实时显示就没了」。
+            # 旧视频读取器已经 stop()，不会有残留帧污染。
+            ep = dev.get("epoch", 0)
             v = VideoReader(f"rtsp://{dev['host']}/live",
                             lambda pb, h=dev["host"], e=ep: self.on_frame(pb, h, e),
                             self.set_status, target=old.target,
@@ -1120,8 +1124,7 @@ class App:
         if old:
             old.stop()
             time.sleep(0.3)
-        dev["epoch"] = dev.get("epoch", 0) + 1
-        ep = dev["epoch"]
+        ep = dev.get("epoch", 0)     # 同样不能递增，见上面的说明
         v = VideoReader(f"rtsp://{host}/live",
                         lambda pb, h=host, e=ep: self.on_frame(pb, h, e),
                         self.set_status, target=getattr(old, "target", None))
