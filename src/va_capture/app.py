@@ -984,6 +984,50 @@ class App:
         if getattr(self, "_rec_guard", False):
             return
         dev = self._dev()
+
+        # ── 复用模式 ──────────────────────────────────────────────
+        # 如果录的就是"当前显示"的设备，它已经有一路视频会话了。
+        # 再起一个 ffmpeg 就是第二路客户端 —— 而设备端视频服务是单客户端
+        # 的预编译程序，多一路会话会显著增加它异常退出的概率，
+        # 退出后还会留下约 25MB 的孤儿 ION 缓冲（整机只有 51MB），
+        # 最终把设备拖死。现场两台设备同固件，只有"显示+录制"的那台挂掉。
+        #
+        # 所以这里把录像任务并进显示读取器：一个 ffmpeg 同时
+        #   ① -c copy 写 mp4 分段  ② 输出原始帧给界面  ③ 写 FLAC 音频
+        # 全程只占 1 路视频客户端。
+        if btn.get_active() and dev.get("vreader") and dev["host"] == self.host:
+            seg_min = max(1, int(self.settings.get("rec_segment_min", 60)))
+            d = os.path.join(self._outdir("recordings"),
+                             f"dev_{dev['host']}", self._stamp())
+            os.makedirs(d, exist_ok=True)
+            old = dev["vreader"]
+            old.stop()
+            time.sleep(0.3)
+            dev["epoch"] = dev.get("epoch", 0) + 1
+            ep = dev["epoch"]
+            v = VideoReader(f"rtsp://{dev['host']}/live",
+                            lambda pb, h=dev["host"], e=ep: self.on_frame(pb, h, e),
+                            self.set_status, target=old.target,
+                            rec={"dir": d, "seg": seg_min * 60,
+                                 "audio": f"rtsp://{dev['host']}:8554/live"})
+            v.hwmode = old.hwmode
+            v.transport = old.transport
+            v.on_video_info = self.on_video_info
+            dev["vreader"] = v
+            v.start()
+            dev["rec_dir"] = d
+            dev["rec_active"] = True
+            dev["rec"] = None
+            self._rec_path = d
+            self._rec_active = True
+            self._update_device_list()
+            self._sync_rec_button()
+            btn.set_label("停止录像")
+            self.log_line(f"{time.strftime('%H:%M:%S')}  -- ● 录制中（复用显示流，"
+                          f"{seg_min}分钟分段）→ {d}")
+            flog.log(f"开始录制（复用模式）: {dev['host']} → {d}")
+            return
+
         if btn.get_active():
             seg_min = max(1, int(self.settings.get("rec_segment_min", 60)))
             total_h = float(self.settings.get("rec_total_hours", 0) or 0)
@@ -1035,9 +1079,14 @@ class App:
                 f"{'不限时长' if total_h <= 0 else f'{total_h:g} 小时'}，"
                 f"约 {est:.1f} GB/小时")
         else:
-            self._kill_dev_rec(dev)
+            if dev.get("rec") is None and dev.get("vreader") and dev.get("rec_active"):
+                # 复用模式：停掉带录像输出的读取器，恢复成纯显示
+                self._restart_reader_plain(dev)
+            else:
+                self._kill_dev_rec(dev)
             dev["rec_active"] = False
             self._update_device_list()
+            self._sync_rec_button()
             btn.set_label("录制音视频")
             self.set_status(f"✓ 已保存 {getattr(self, '_rec_path', '')}")
             self.log_line(
@@ -1060,6 +1109,29 @@ class App:
             self._kill_recs()
             btn.set_label("录 8 轨音频")
             self.set_status(f"✓ 已保存 {getattr(self, '_rec_path', '')}")
+
+    def _restart_reader_plain(self, dev):
+        """把复用录制中的读取器换回纯显示模式"""
+        host = dev["host"]
+        old = dev.get("vreader")
+        if old:
+            old.stop()
+            time.sleep(0.3)
+        dev["epoch"] = dev.get("epoch", 0) + 1
+        ep = dev["epoch"]
+        v = VideoReader(f"rtsp://{host}/live",
+                        lambda pb, h=host, e=ep: self.on_frame(pb, h, e),
+                        self.set_status, target=getattr(old, "target", None))
+        if old:
+            v.hwmode = old.hwmode
+            v.transport = old.transport
+        v.on_video_info = self.on_video_info
+        dev["vreader"] = v
+        v.start()
+        if dev.get("rec_dir"):
+            self.log_line(f"{time.strftime('%H:%M:%S')}  -- ✓ 已保存 {dev['rec_dir']}")
+            flog.log(f"停止录制（复用模式）: {dev['rec_dir']}")
+        dev["rec_dir"] = ""
 
     def _kill_dev_rec(self, dev):
         """只停止某台设备的录制"""

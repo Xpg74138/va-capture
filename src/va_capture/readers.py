@@ -146,8 +146,15 @@ def probe_vaapi(url=None, timeout=20):
 class VideoReader(threading.Thread):
     """ffmpeg -> rgb24 -> GdkPixbuf"""
 
-    def __init__(self, url, on_frame, on_status, target=None):
+    def __init__(self, url, on_frame, on_status, target=None, rec=None):
         super().__init__(daemon=True)
+        # rec = {"dir":录像目录, "seg":分段秒数, "audio":音频RTSP地址}
+        # 置上后本进程同时做两件事：
+        #   ① -c copy 写 mp4 分段（录像）
+        #   ② 输出 rgb24 原始帧到 stdout（界面显示）
+        # 这样"显示"和"录制"只占设备的 1 路视频客户端 —— 设备端视频服务
+        # 是单客户端的，开两路会显著增加它异常退出的概率（并泄漏 ION 内存）
+        self.rec = rec
         self.url, self.on_frame, self.on_status = url, on_frame, on_status
         self.target = target
         # 解码模式：vaapi=全GPU管线, vaapi_sw=GPU解码+CPU缩放, sw=纯软解
@@ -268,6 +275,52 @@ class VideoReader(threading.Thread):
                    "-i", self.url, "-an",
                    "-vf", f"scale={w}:{h}:flags=fast_bilinear",
                    "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        if self.rec:
+            # 在同一个 ffmpeg 里追加两个输出（录像 mp4 + FLAC 音频），
+            # 原始帧输出仍是最后一个 "-"（stdout）
+            audio_url = self.rec.get("audio")
+            seg = int(self.rec.get("seg", 3600))
+            d = self.rec["dir"]
+            try:
+                os.makedirs(d, exist_ok=True)
+            except Exception:
+                pass
+            # 续接分段编号，避免重连后从 000 覆盖已有文件
+            start_no = 0
+            try:
+                start_no = len([f for f in os.listdir(d) if f.startswith("seg_")
+                                and f.endswith(".mp4")])
+            except Exception:
+                pass
+            # 把录像输入插在视频输入之后
+            idx = cmd.index("-i") + 2
+            rec_in = []
+            if audio_url:
+                rec_in = ["-rtsp_transport", "udp", "-buffer_size", "1048576",
+                          "-i", audio_url]
+            cmd = cmd[:idx] + rec_in + cmd[idx:]
+
+            graph = ""
+            amap = []
+            if audio_url:
+                graph = "".join(f"[1:a:{i}]" for i in range(AUDIO_CH))
+                graph += f"amerge=inputs={AUDIO_CH}[a]"
+                amap = ["-filter_complex", graph, "-map", "[a]",
+                        "-c:a", "flac", "-f", "segment",
+                        "-segment_time", str(seg),
+                        "-segment_start_number", str(start_no),
+                        os.path.join(d, "seg_%03d.flac")]
+            rec_out = ["-map", "0:v", "-c", "copy",
+                       "-f", "segment", "-segment_time", str(seg),
+                       "-reset_timestamps", "1",
+                       "-segment_start_number", str(start_no),
+                       os.path.join(d, "seg_%03d.mp4")] + amap
+            # 关键：录像输出必须插在 "-an -vf ... -f rawvideo" 这一组
+            # 「显示输出」选项之前，否则 -vf/-an 会被绑到 mp4 输出上，
+            # 导致 -c copy 与 -vf 冲突、ffmpeg 直接报错
+            ri = cmd.index("-an")
+            cmd = cmd[:ri] + rec_out + cmd[ri:]
+
         try:
             self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                          stderr=subprocess.DEVNULL,
