@@ -430,8 +430,10 @@ class App:
                                          level="WARN")
                         else:
                             self._silent_n = 0
+                        lag = age if age < 5000 else -1   # -1 = 无有效画面
                         flog.log(
-                            f"stats: fps={self._fps_last:.1f} lag={age:.0f}ms "
+                            f"stats: fps={self._fps_last:.1f} "
+                            f"lag={('%.0fms' % lag) if lag >= 0 else 'n/a'} "
                             f"audio={db:.1f}dB devs={devs or '-'}")
                     except Exception:
                         pass
@@ -638,6 +640,7 @@ class App:
 
     def _reset_view_state(self):
         """切换设备时彻底清空显示，避免残留上一台设备的画面"""
+        self._age = 0.0
         try:
             # 视频：换成纯黑帧，避免旧画面残留造成混淆
             blank = np.zeros((540, 960, 3), dtype=np.uint8)

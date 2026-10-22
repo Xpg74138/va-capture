@@ -390,10 +390,14 @@ class AudioReader(threading.Thread):
             if self._stop.is_set():
                 break
             self._retry = getattr(self, "_retry", 0) + 1
-            if self._retry in (1, 5, 20) or self._retry % 60 == 0:
+            # 指数退避：设备已经不在线时不要每 5 秒起一次 ffmpeg 刷屏
+            # （现场一台已下线的设备刷了 1.5MB 日志、几千个进程）
+            delay = min(30, 2 ** min(self._retry, 5))
+            if self._retry in (1, 3, 10, 50) or self._retry % 100 == 0:
                 GLib.idle_add(
-                    self.on_status, f"音频断开，2 秒后重连… (第 {self._retry} 次)")
-            time.sleep(2)
+                    self.on_status,
+                    f"音频断开，{delay} 秒后重连… (第 {self._retry} 次)")
+            time.sleep(delay)
 
     def _run_once(self):
         # 8 条独立单声道 track 必须用 amerge 合成一条 8 通道流；
