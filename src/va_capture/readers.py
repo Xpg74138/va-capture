@@ -157,6 +157,7 @@ class VideoReader(threading.Thread):
         self.rec = rec
         self.url, self.on_frame, self.on_status = url, on_frame, on_status
         self.target = target
+        self.label = url.split("//")[-1].split(":")[0]
         # 解码模式：vaapi=全GPU管线, vaapi_sw=GPU解码+CPU缩放, sw=纯软解
         self.hwmode = "sw"
         self._switching = False      # 主动热切换时不计入失败次数
@@ -207,7 +208,7 @@ class VideoReader(threading.Thread):
 
             if self._stop.is_set():
                 break
-            GLib.idle_add(self.on_status, "视频断开，3 秒后重连…")
+            GLib.idle_add(self.on_status, f"{self.label} 视频断开，3 秒后重连…")
             time.sleep(3)
 
     def _run_once(self):
@@ -222,7 +223,7 @@ class VideoReader(threading.Thread):
             # 只报第 1/5/20/60 次，避免设备挂着时日志刷屏
             if attempt + 1 in (1, 5, 20, 60):
                 GLib.idle_add(self.on_status,
-                              f"等待视频服务… ({attempt + 1})")
+                              f"{self.label} 等待视频服务… ({attempt + 1})")
             # 间隔要够长：设备端每次 RTSP 会话都会占一块摄像头缓冲，
             # 频繁重连会把它撑到 OOM
             time.sleep(5)
@@ -366,9 +367,11 @@ class VideoReader(threading.Thread):
 class AudioReader(threading.Thread):
     """ffmpeg -> s16le 8ch -> 电平 + 波形"""
 
-    def __init__(self, url, on_audio, on_status):
+    def __init__(self, url, on_audio, on_status, label=None):
         super().__init__(daemon=True)
         self.url, self.on_audio, self.on_status = url, on_audio, on_status
+        # 消息里带上设备地址：多设备时否则分不清是哪台在断
+        self.label = label or url.split("//")[-1].split(":")[0]
         self._stop = threading.Event()
         self.proc = None
 
@@ -396,7 +399,7 @@ class AudioReader(threading.Thread):
             if self._retry in (1, 3, 10, 50) or self._retry % 100 == 0:
                 GLib.idle_add(
                     self.on_status,
-                    f"音频断开，{delay} 秒后重连… (第 {self._retry} 次)")
+                    f"{self.label} 音频断开，{delay} 秒后重连… (第 {self._retry} 次)")
             time.sleep(delay)
 
     def _run_once(self):
@@ -417,13 +420,18 @@ class AudioReader(threading.Thread):
             GLib.idle_add(self.on_status, f"音频启动失败: {e}")
             return
 
-        self._retry = 0
-        GLib.idle_add(self.on_status, "8 轨音频已连接")
+        _first = True
 
         while not self._stop.is_set():
             raw = self.proc.stdout.read(AUDIO_BYTES)
             if not raw or len(raw) < AUDIO_BYTES:
                 break
+            if _first:
+                # 收到第一块数据才算真正连上；之前在这里就清零，
+                # 会让"设备不可达"的重试计数永远停在 1，退避失效、日志刷屏
+                _first = False
+                self._retry = 0
+                GLib.idle_add(self.on_status, f"{self.label} 8 轨音频已连接")
             a = np.frombuffer(raw, dtype="<i2").astype(np.float32)
             a = a.reshape(AUDIO_BLOCK, AUDIO_CH).T / 32768.0
             # 同样用有界队列，溢出时丢最旧的块
@@ -433,7 +441,8 @@ class AudioReader(threading.Thread):
             self.proc.kill()
         except Exception:
             pass
-        GLib.idle_add(self.on_status, "音频已断开")
+        if not _first:
+            GLib.idle_add(self.on_status, f"{self.label} 音频已断开")
 
 
 # --------------------------------------------------------------------------

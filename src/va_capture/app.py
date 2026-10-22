@@ -861,7 +861,7 @@ class App:
         self.vreader.start()
         self.areader = AudioReader(f"rtsp://{host}:8554/live",
                                    lambda a, h=host, e=ep: self.on_audio(a, h, e),
-                                   self.set_status)
+                                   self.set_status, label=host)
         dev0["areader"] = self.areader
         self.areader.start()
         self.btn_conn.set_sensitive(False)
