@@ -658,7 +658,8 @@ class App:
         # 旧设备的读取器要停掉，它的状态随之变为未连接
         # 注意：**不停掉旧设备的读取器** —— 各设备独立保持连接，
         # 否则"切到 2 号，1 号就断线"会让人以为设备掉线了。
-        old = self._dev()
+        old = self.devices.get(self.host) or {}
+        _prev = self.host
         self.host = host
         self.ip.set_text(host)
         self._reset_view_state()
@@ -666,6 +667,10 @@ class App:
         # 列表只负责"切换显示 + 状态展示"，绝不自动联网：
         # 需要接收时由用户显式点「连接」
         dev = self._dev(host)
+        _od = self.devices.get(_prev) or {}
+        if (_prev and _prev != host and not _od.get("vreader")
+                and not _od.get("areader") and not _od.get("rec_active")):
+            self.devices.pop(_prev, None)     # 旧地址已下线，别留在列表里
         self._update_device_list()
         self._sync_device_combo(host)
         self.btn_conn.set_sensitive(not bool(dev.get("vreader")))
@@ -798,6 +803,14 @@ class App:
                     flog.log(f"移除已下线设备: {', '.join(drop)}")
                     self._update_device_list()
 
+                # 当前设备不在扫描结果里 → 自动切到一台还在线的，
+                # 避免界面和 IP 框停在已经消失的地址上
+                _cur = self.devices.get(self.host) or {}
+                if (found and self.host not in found_set
+                        and not _cur.get("vreader") and not _cur.get("rec_active")):
+                    self.switch_to(found[0])
+                    self.ip.set_text(found[0])
+
                 # 扫描结束后让下拉框仍指向当前设备
                 self._sync_device_combo(self.host)
                 self.btn_scan.set_sensitive(True)
@@ -837,9 +850,9 @@ class App:
                         self.cmb_dev.set_active(i)
                         break
                 else:
-                    # 不在列表里就补进去
-                    self.cmb_dev.append_text(host)
-                    self.cmb_dev.set_active(len(model))
+                    # 当前设备不在扫描结果里（已经下线）：
+                    # 不要再把它塞回下拉框 —— 那会让已消失的地址长期挂在那里
+                    self.cmb_dev.set_active(-1)
         except Exception:
             pass
         finally:
