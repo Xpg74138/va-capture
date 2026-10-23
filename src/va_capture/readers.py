@@ -1,5 +1,5 @@
 """RTSP 拉流线程：视频 / 8 轨音频，以及解码能力探测"""
-import os, subprocess, threading, time
+import os, signal, subprocess, threading, time
 import numpy as np
 import fcntl
 import collections
@@ -168,10 +168,20 @@ class VideoReader(threading.Thread):
         self.proc = None
 
     def stop(self):
+        """请求停止。
+
+        注意：复用录制时这个进程同时在写 mp4/flac，直接 SIGKILL 会丢掉
+        mp4 的 moov 索引 —— 最后一段动辄几 GB 却完全无法播放（现场踩过）。
+        这里改为发 SIGINT（ffmpeg 的优雅退出信号），并让读取线程继续
+        把 stdout 读干，ffmpeg 才能正常收尾。
+        """
         self._stop.set()
         if self.proc and self.proc.poll() is None:
             try:
-                self.proc.terminate()
+                if self.rec:
+                    self.proc.send_signal(signal.SIGINT)
+                else:
+                    self.proc.terminate()
             except Exception:
                 pass
 
@@ -357,11 +367,25 @@ class VideoReader(threading.Thread):
             if now - t0 >= 2.0:
                 n, t0 = 0, now
 
+        # 收尾：复用录制时继续读干管道，给 ffmpeg 时间写 moov，
+        # 否则最后一段 mp4 无法播放
+        if self.rec and self.proc and self.proc.poll() is None:
+            try:
+                _t = time.time()
+                while time.time() - _t < 8:
+                    if not self.proc.stdout.read(size):
+                        break
+            except Exception:
+                pass
         try:
-            self.proc.kill()
+            if self.proc.poll() is None:
+                self.proc.wait(timeout=5)
         except Exception:
-            pass
-        GLib.idle_add(self.on_status, "视频已断开")
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+        GLib.idle_add(self.on_status, f"{self.label} 视频已断开")
 
 
 class AudioReader(threading.Thread):

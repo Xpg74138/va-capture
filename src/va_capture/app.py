@@ -349,9 +349,11 @@ class App:
         """
         h = host or self.host
         d = self._dev(h)
-        if epoch is not None and epoch != d.get("epoch"):
-            return                      # 该设备已重连/断开，丢弃旧数据
+        # 不再按 epoch 丢弃帧：纪元号一旦对不上就"静默不再更新画面"，
+        # 而读取器和录制仍在正常跑 —— 现场表现为"长时间录制后画面冻结，
+        # 停止录制才恢复"，极难排查。切设备时已用 host 过滤，足够。
         d["newest_frame"] = (time.perf_counter(), pb)
+        self._frame_count = getattr(self, "_frame_count", 0) + 1
         if d.get("status") != "已连接":
             d["status"] = "已连接"
             d["connected"] = True
@@ -430,7 +432,18 @@ class App:
                                          level="WARN")
                         else:
                             self._silent_n = 0
+                        fc = self._frame_count
+                        dfr = fc - getattr(self, "_frame_count_last", fc)
+                        self._frame_count_last = fc
                         lag = age if age < 5000 else -1   # -1 = 无有效画面
+                        if dfr == 0 and dcur.get("vreader"):
+                            v = dcur["vreader"]
+                            alive = getattr(v, "proc", None) and v.proc.poll() is None
+                            flog.log(
+                                f"WARN 无帧到达: host={self.host} "
+                                f"reader_alive={bool(alive)} "
+                                f"stalled={getattr(self,'_stalled',False)} "
+                                f"age={age:.0f}ms", level="WARN")
                         flog.log(
                             f"stats: fps={self._fps_last:.1f} "
                             f"lag={('%.0fms' % lag) if lag >= 0 else 'n/a'} "
@@ -445,8 +458,6 @@ class App:
         """由音频线程调用：只有当前显示设备的数据进入处理队列"""
         h = host or self.host
         d = self._dev(h)
-        if epoch is not None and epoch != d.get("epoch"):
-            return False        # 该设备已重连，丢弃旧数据
         if h != self.host:
             return False        # 后台设备：不处理音频（省 CPU，录制不受影响）
         # 带上数据所属世代：取用时不匹配的直接丢掉，
