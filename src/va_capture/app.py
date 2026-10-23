@@ -63,6 +63,7 @@ class App:
         self._age = 0.0
         self._audio_q = collections.deque(maxlen=60)
         GLib.timeout_add(33, self._display_tick)
+        GLib.timeout_add(1000, self._rec_tick)   # 录制时长每秒刷新
         GLib.timeout_add(20, self._audio_tick)
         self.src_size = ""
 
@@ -591,6 +592,43 @@ class App:
             self.devices[host] = d
         return d
 
+    @staticmethod
+    def _fmt_dur(sec):
+        """秒数 -> HH:MM:SS（录制时长显示用）"""
+        sec = max(0, int(sec))
+        return f"{sec // 3600:02d}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
+
+    def _dev_markup(self, d):
+        """单台设备的列表行文本"""
+        bits = []
+        st = d.get("status", "未连接")
+        if st == "已连接":
+            bits.append("<span color='#4ade80'>● 已连接</span>")
+        elif st == "连接中":
+            bits.append("<span color='#facc15'>◌ 连接中</span>")
+        elif st == "信号中断":
+            bits.append("<span color='#f87171'>● 信号中断</span>")
+        else:
+            bits.append("<span color='#8b93a3'>○ 未连接</span>")
+        if d.get("rec_active"):
+            t0 = d.get("rec_start") or time.time()
+            bits.append("<span color='#f87171'>● 录制中 "
+                        + self._fmt_dur(time.time() - t0) + "</span>")
+        mark = "▶ " if d["host"] == self.host else "  "
+        return f"{mark}<b>{d['host']}</b>　" + "　".join(bits)
+
+    def _rec_tick(self):
+        """每秒只刷新列表行的文字（不重建 ListBox，避免选中状态丢失）"""
+        try:
+            for row in self.dev_rows.get_children():
+                d = self.devices.get(getattr(row, "host", ""))
+                lbl = getattr(row, "label", None)
+                if d and lbl is not None:
+                    lbl.set_markup(self._dev_markup(d))
+        except Exception:
+            pass
+        return True
+
     def _update_device_list(self):
         """刷新左下角设备列表"""
         try:
@@ -598,24 +636,14 @@ class App:
                 self.dev_rows.remove(row)
             for host in sorted(self.devices):
                 d = self.devices[host]
-                bits = []
-                st = d.get("status", "未连接")
-                if st == "已连接":
-                    bits.append("<span color='#4ade80'>● 已连接</span>")
-                elif st == "连接中":
-                    bits.append("<span color='#facc15'>◌ 连接中</span>")
-                else:
-                    bits.append("<span color='#8b93a3'>○ 未连接</span>")
-                if d["rec_active"]:
-                    bits.append("<span color='#f87171'>● 录制中</span>")
-                mark = "▶ " if host == self.host else "  "
                 lbl = Gtk.Label()
                 lbl.set_xalign(0.0)
-                lbl.set_markup(f"{mark}<b>{host}</b>　" + "　".join(bits))
+                lbl.set_markup(self._dev_markup(d))
                 lbl.set_margin_start(4)
                 row = Gtk.ListBoxRow()
                 row.add(lbl)
                 row.host = host
+                row.label = lbl
                 self.dev_rows.add(row)
             self.dev_rows.show_all()
         except Exception:
@@ -752,6 +780,24 @@ class App:
                 else:
                     self.set_status("未发现设备（检查网线 / IP 网段）")
                 self._combo_guard = False
+
+                # 只保留"当前能探测到的"设备：
+                # 已经消失、又没有在录制/没有活动读取器的条目直接移除，
+                # 免得列表里长期挂着早就下线的地址
+                found_set = set(found)
+                drop = []
+                for h, dd in list(self.devices.items()):
+                    if h in found_set:
+                        continue
+                    if dd.get("rec_active") or dd.get("vreader") or dd.get("areader"):
+                        continue
+                    drop.append(h)
+                for h in drop:
+                    self.devices.pop(h, None)
+                if drop:
+                    flog.log(f"移除已下线设备: {', '.join(drop)}")
+                    self._update_device_list()
+
                 # 扫描结束后让下拉框仍指向当前设备
                 self._sync_device_combo(self.host)
                 self.btn_scan.set_sensitive(True)
@@ -1038,6 +1084,7 @@ class App:
             v.start()
             dev["rec_dir"] = d
             dev["rec_active"] = True
+            dev["rec_start"] = time.time()
             dev["rec"] = None
             self._rec_path = d
             self._rec_active = True
@@ -1084,6 +1131,7 @@ class App:
             dev["rec"] = subprocess.Popen(cmd)
             dev["rec_dir"] = d
             dev["rec_active"] = True
+            dev["rec_start"] = time.time()
             self.recs.append(dev["rec"])
             self._rec_path = d
             self._rec_active = True
@@ -1106,6 +1154,7 @@ class App:
             else:
                 self._kill_dev_rec(dev)
             dev["rec_active"] = False
+            dev["rec_start"] = None
             self._update_device_list()
             self._sync_rec_button()
             btn.set_label("录制音视频")
