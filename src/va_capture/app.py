@@ -122,6 +122,11 @@ class App:
 
 
 
+        self.btn_alias = Gtk.Button(label="别名")
+        self.btn_alias.set_tooltip_text("给当前设备设置一个可读别名（显示与录制目录都用它）")
+        self.btn_alias.connect("clicked", self.edit_alias)
+        bar.pack_start(self.btn_alias, False, False, 0)
+
         self.btn_snap = Gtk.Button(label="截帧")
         self.btn_snap.connect("clicked", self.snapshot)
         bar.pack_start(self.btn_snap, False, False, 0)
@@ -592,6 +597,30 @@ class App:
             self.devices[host] = d
         return d
 
+    def _alias(self, host):
+        """取设备的可读别名（没设置就返回空）"""
+        try:
+            return (self.settings.get("aliases") or {}).get(host, "").strip()
+        except Exception:
+            return ""
+
+    def _disp(self, host):
+        """显示用名称：有别名时 "别名 (ip)"，否则就是 ip"""
+        a = self._alias(host)
+        return f"{a} ({host})" if a else host
+
+    def _rec_dirname(self, host):
+        """录制目录名：优先用别名，非法字符替换，冲突时带上 IP"""
+        a = self._alias(host)
+        if not a:
+            return f"dev_{host}"
+        safe = "".join(c if c not in '\\/:*?"<>|' else "_" for c in a).strip()
+        safe = safe[:32] or f"dev_{host}"
+        # 两台同名时用 IP 区分
+        same = [h for h in self.devices
+                if h != host and self._alias(h) == a]
+        return f"{safe}_{host}" if same else safe
+
     @staticmethod
     def _fmt_dur(sec):
         """秒数 -> HH:MM:SS（录制时长显示用）"""
@@ -615,7 +644,10 @@ class App:
             bits.append("<span color='#f87171'>● 录制中 "
                         + self._fmt_dur(time.time() - t0) + "</span>")
         mark = "▶ " if d["host"] == self.host else "  "
-        return f"{mark}<b>{d['host']}</b>　" + "　".join(bits)
+        a = self._alias(d["host"])
+        name = (f"<b>{a}</b> <span size='small' color='#8b93a3'>{d['host']}</span>"
+                if a else f"<b>{d['host']}</b>")
+        return f"{mark}{name}　" + "　".join(bits)
 
     def _rec_tick(self):
         """每秒只刷新列表行的文字（不重建 ListBox，避免选中状态丢失）"""
@@ -776,7 +808,8 @@ class App:
                 self._combo_guard = True
                 self.cmb_dev.remove_all()
                 for ip in found:
-                    self.cmb_dev.append_text(ip)
+                    a = self._alias(ip)
+                    self.cmb_dev.append(ip, f"{a} · {ip}" if a else ip)
                 if found:
                     self.cmb_dev.set_active(0)
                     # 只调 set_status：它内部会写事件记录框和日志文件，
@@ -821,6 +854,46 @@ class App:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def edit_alias(self, *_):
+        """给当前设备设置别名"""
+        host = self.host
+        dlg = Gtk.Dialog(title="设备别名", transient_for=self.win, modal=True)
+        dlg.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
+        dlg.set_default_size(360, -1)
+        box = dlg.get_content_area()
+        box.set_spacing(8)
+        lab = Gtk.Label()
+        lab.set_markup(f"设备 <b>{host}</b> 的别名（用于界面显示和录制目录名）：")
+        lab.set_xalign(0.0)
+        box.pack_start(lab, False, False, 0)
+        ent = Gtk.Entry()
+        ent.set_text(self._alias(host))
+        ent.set_placeholder_text("例如：前门 / 猪舍-东 / 一号机")
+        ent.set_activates_default(True)
+        box.pack_start(ent, False, False, 0)
+        hint = Gtk.Label()
+        hint.set_markup("<span size='small' color='#8b93a3'>留空表示清除别名</span>")
+        hint.set_xalign(0.0)
+        box.pack_start(hint, False, False, 0)
+        dlg.show_all()
+        if dlg.run() == Gtk.ResponseType.OK:
+            name = ent.get_text().strip()
+            al = dict(self.settings.get("aliases") or {})
+            if name:
+                al[host] = name
+            else:
+                al.pop(host, None)
+            self.settings["aliases"] = al
+            try:
+                save_settings(self.settings)
+            except Exception:
+                pass
+            self._update_device_list()
+            self._sync_device_combo(self.host)
+            self.log_line(f"{time.strftime('%H:%M:%S')}  -- 设备 {host} 别名："
+                          f"{name or '（已清除）'}")
+        dlg.destroy()
+
     def _on_row_activated(self, lb, row):
         host = getattr(row, "host", None)
         if host:
@@ -830,7 +903,7 @@ class App:
         """下拉框选中某台设备 = 切换到那台（改 host / 按钮状态 / 清空画面）"""
         if getattr(self, "_combo_guard", False):
             return
-        txt = cmb.get_active_text()
+        txt = cmb.get_active_id() or cmb.get_active_text()
         if not txt:
             return
         self.ip.set_text(txt)
@@ -1074,7 +1147,7 @@ class App:
         if btn.get_active() and dev.get("vreader") and dev["host"] == self.host:
             seg_min = max(1, int(self.settings.get("rec_segment_min", 60)))
             d = os.path.join(self._outdir("recordings"),
-                             f"dev_{dev['host']}", self._stamp())
+                             self._rec_dirname(dev["host"]), self._stamp())
             os.makedirs(d, exist_ok=True)
             old = dev["vreader"]
             old.stop()
@@ -1113,7 +1186,7 @@ class App:
             seg_min = max(1, int(self.settings.get("rec_segment_min", 60)))
             total_h = float(self.settings.get("rec_total_hours", 0) or 0)
             d = os.path.join(self._outdir("recordings"),
-                             f"dev_{dev['host']}", self._stamp())
+                             self._rec_dirname(dev["host"]), self._stamp())
             os.makedirs(d, exist_ok=True)
             seg = seg_min * 60
 
