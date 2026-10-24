@@ -38,7 +38,7 @@ else
 fi
 
 mkdir -p "$UNIT_DIR"
-sed "s|@EXEC@|$EXEC|" "$ROOT/packaging/va-capture.service" > "$UNIT"
+sed "s|^ExecStart=.*|ExecStart=$EXEC|" "$ROOT/packaging/va-capture.service" > "$UNIT"
 
 systemctl --user daemon-reload
 systemctl --user enable va-capture.service

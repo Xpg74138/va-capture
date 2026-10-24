@@ -7,7 +7,7 @@ After=graphical-session.target network-online.target
 Type=simple
 Environment=DISPLAY=:0
 Environment=PYTHONUNBUFFERED=1
-ExecStart=@EXEC@
+ExecStart=/usr/bin/va-capture
 Restart=on-failure
 RestartSec=5
 

@@ -13,6 +13,7 @@ mkdir -p "$BUILD/DEBIAN" \
          "$BUILD/usr/bin" \
          "$BUILD/usr/share/applications" \
          "$BUILD/usr/share/icons/hicolor/scalable/apps" \
+         "$BUILD/usr/lib/systemd/user" \
          "$BUILD/usr/share/doc/va-capture"
 
 # 代码
@@ -29,6 +30,8 @@ chmod 755 "$BUILD/usr/bin/va-capture"
 install -m 644 "$ROOT/packaging/va-capture.desktop" "$BUILD/usr/share/applications/"
 install -m 644 "$ROOT/packaging/va-capture.svg" \
     "$BUILD/usr/share/icons/hicolor/scalable/apps/va-capture.svg"
+install -m 644 "$ROOT/packaging/va-capture.service" \
+    "$BUILD/usr/lib/systemd/user/va-capture.service"
 install -m 644 "$ROOT/README.md" "$BUILD/usr/share/doc/va-capture/README.md"
 
 SIZE=$(du -sk "$BUILD/usr" | cut -f1)
@@ -56,6 +59,23 @@ fi
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
 fi
+
+# 给"执行 sudo 的那个用户"装好 systemd 用户服务并启用（随登录自启）。
+# 这样换台电脑只要装上这个 deb 就完事，不用再跑额外脚本。
+U="${SUDO_USER:-}"
+if [ -n "$U" ] && [ "$U" != "root" ] && id "$U" >/dev/null 2>&1; then
+    UH="$(getent passwd "$U" | cut -d: -f6)"
+    UD="$UH/.config/systemd/user"
+    mkdir -p "$UD" 2>/dev/null || true
+    ln -sf /usr/lib/systemd/user/va-capture.service "$UD/va-capture.service" 2>/dev/null || true
+    chown -h "$U:$U" "$UD/va-capture.service" 2>/dev/null || true
+    # 以该用户身份启用（失败不阻塞安装）
+    runuser -u "$U" -- systemctl --user daemon-reload 2>/dev/null || true
+    runuser -u "$U" -- systemctl --user enable va-capture.service 2>/dev/null || true
+    echo "已为 $U 启用 va-capture 用户服务（下次登录自动启动，内存上限 2G）"
+    echo "  立即启动: systemctl --user start va-capture"
+    echo "  查看日志: journalctl --user -u va-capture -f"
+fi
 exit 0
 POST
 chmod 755 "$BUILD/DEBIAN/postinst"
@@ -63,6 +83,12 @@ chmod 755 "$BUILD/DEBIAN/postinst"
 cat > "$BUILD/DEBIAN/prerm" <<'PRE'
 #!/bin/sh
 set -e
+U="${SUDO_USER:-}"
+if [ -n "$U" ] && [ "$U" != "root" ]; then
+    UH="$(getent passwd "$U" | cut -d: -f6)"
+    runuser -u "$U" -- systemctl --user disable --now va-capture.service 2>/dev/null || true
+    rm -f "$UH/.config/systemd/user/va-capture.service" 2>/dev/null || true
+fi
 exit 0
 PRE
 chmod 755 "$BUILD/DEBIAN/prerm"

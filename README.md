@@ -135,6 +135,38 @@ rtsp://<ip>:8554 ──┘                 ├─► seg_%03d.flac  (8 轨合并
 录制**其它设备**（非当前显示）时，仍然单独起一个进程 —— 因为那台设备
 本来就没有显示会话，总共也是 1 路客户端。
 
+## 换一台电脑：只装 .deb 就够
+
+```bash
+sudo apt install ./va-capture_1.0.17_all.deb
+```
+
+安装包里已经包含：
+
+| 内容 | 说明 |
+|---|---|
+| 程序本体 | `/usr/lib/va-capture/` |
+| 命令 | `/usr/bin/va-capture` |
+| 桌面入口 | 应用菜单里的「VA Capture」 |
+| **systemd 用户服务** | `/usr/lib/systemd/user/va-capture.service` |
+
+`postinst` 会自动为执行 `sudo` 的那个用户：
+
+- 把服务软链到 `~/.config/systemd/user/`
+- 执行 `systemctl --user enable va-capture`
+
+所以**下次登录自动启动**，自带：
+
+```
+Restart=on-failure   崩溃 5 秒自动拉起
+MemoryMax=2G         独立 cgroup，录制缓存不会拖垮整机
+```
+
+装完立即启动：`systemctl --user start va-capture`
+
+> 想恢复原来的设备别名和保存路径？
+> 把旧电脑的 `~/.config/tinyvision-monitor.json` 拷到新电脑同路径即可。
+
 ## 后台常驻运行（推荐）
 
 长时间测试时，**不要从终端里直接启动** —— 终端的 cgroup 里若有别的程序

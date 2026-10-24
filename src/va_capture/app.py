@@ -1659,8 +1659,30 @@ class App:
 
 
 
+def _acquire_single_instance():
+    """单实例锁：已经有一个在跑就直接退出。
+
+    场景：装成 systemd 服务后它随登录自启，用户再从菜单点一次图标，
+    就会出现两个实例抢同一个设备的 RTSP 客户端（设备端是单客户端设计）。
+    """
+    import tempfile
+    path = os.path.join(tempfile.gettempdir(), "va-capture.lock")
+    try:
+        f = open(path, "w")
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        f.write(str(os.getpid()))
+        f.flush()
+        return f            # 保持引用，进程存活期间一直持有
+    except Exception:
+        return None
+
+
 def main():
     host = sys.argv[1] if len(sys.argv) > 1 else "192.168.2.2"
+    _lock = _acquire_single_instance()
+    if _lock is None:
+        print("va-capture 已在运行（单实例保护），本次启动退出")
+        return
     app = App(host)
     # 不自动连接：窗口先出来，由用户点「连接」再拉流。
     # 但启动 1 秒后自动扫一次网段，把设备列进下拉框（多设备时不用手输 IP）
