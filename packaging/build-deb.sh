@@ -19,11 +19,27 @@ mkdir -p "$BUILD/DEBIAN" \
 # 代码
 install -m 644 "$ROOT"/src/va_capture/*.py "$BUILD/usr/lib/va-capture/va_capture/"
 
-# 启动器（安装版：PYTHONPATH 指向 /usr/lib/va-capture）
+# 启动器 = 包装脚本
+#   · 从服务里调用（带 VA_CAPTURE_SERVICE）→ 直接运行 App
+#   · 从菜单/命令行调用 → 转去 systemctl --user start，让 App 在服务 cgroup 里跑
+#     （从而拿到 2GB 内存上限和崩溃自愈）
+#   · 没有 systemd 用户会话时 → 退化为直接运行
 cat > "$BUILD/usr/bin/va-capture" <<'LAUNCH'
 #!/bin/sh
 export PYTHONPATH="/usr/lib/va-capture${PYTHONPATH:+:$PYTHONPATH}"
-exec python3 -m va_capture "$@"
+
+if [ -n "$VA_CAPTURE_SERVICE" ]; then
+    exec python3 -m va_capture "$@"          # 已在服务内，直接跑
+fi
+
+if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+    # 已经有实例在跑 → start 是幂等的，直接返回
+    if systemctl --user start va-capture.service 2>/dev/null; then
+        exit 0
+    fi
+fi
+
+exec python3 -m va_capture "$@"              # 兜底：直接运行
 LAUNCH
 chmod 755 "$BUILD/usr/bin/va-capture"
 
@@ -60,21 +76,13 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
 fi
 
-# 给"执行 sudo 的那个用户"装好 systemd 用户服务并启用（随登录自启）。
-# 这样换台电脑只要装上这个 deb 就完事，不用再跑额外脚本。
+# 用户服务单元放在 /usr/lib/systemd/user 下，所有用户都能直接 start，
+# 但**不 enable** —— 按需求：只有打开 App 时才启动（见 /usr/bin/va-capture 包装脚本）
 U="${SUDO_USER:-}"
 if [ -n "$U" ] && [ "$U" != "root" ] && id "$U" >/dev/null 2>&1; then
-    UH="$(getent passwd "$U" | cut -d: -f6)"
-    UD="$UH/.config/systemd/user"
-    mkdir -p "$UD" 2>/dev/null || true
-    ln -sf /usr/lib/systemd/user/va-capture.service "$UD/va-capture.service" 2>/dev/null || true
-    chown -h "$U:$U" "$UD/va-capture.service" 2>/dev/null || true
-    # 以该用户身份启用（失败不阻塞安装）
     runuser -u "$U" -- systemctl --user daemon-reload 2>/dev/null || true
-    runuser -u "$U" -- systemctl --user enable va-capture.service 2>/dev/null || true
-    echo "已为 $U 启用 va-capture 用户服务（下次登录自动启动，内存上限 2G）"
-    echo "  立即启动: systemctl --user start va-capture"
-    echo "  查看日志: journalctl --user -u va-capture -f"
+    echo "va-capture 已安装。从应用菜单打开即可（会自动以服务方式运行，"
+    echo "带内存上限与崩溃自愈；不会随开机自启）。"
 fi
 exit 0
 POST

@@ -7,6 +7,8 @@ After=graphical-session.target network-online.target
 Type=simple
 Environment=DISPLAY=:0
 Environment=PYTHONUNBUFFERED=1
+# 由包装脚本判断：带这个标记时直接跑 App，否则转去拉起服务
+Environment=VA_CAPTURE_SERVICE=1
 ExecStart=/usr/bin/va-capture
 Restart=on-failure
 RestartSec=5

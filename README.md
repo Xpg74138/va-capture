@@ -150,19 +150,29 @@ sudo apt install ./va-capture_1.0.17_all.deb
 | 桌面入口 | 应用菜单里的「VA Capture」 |
 | **systemd 用户服务** | `/usr/lib/systemd/user/va-capture.service` |
 
-`postinst` 会自动为执行 `sudo` 的那个用户：
+**启动方式：跟着 App 走**，不会随开机自启。
 
-- 把服务软链到 `~/.config/systemd/user/`
-- 执行 `systemctl --user enable va-capture`
-
-所以**下次登录自动启动**，自带：
+`/usr/bin/va-capture` 是一个包装脚本：
 
 ```
-Restart=on-failure   崩溃 5 秒自动拉起
-MemoryMax=2G         独立 cgroup，录制缓存不会拖垮整机
+从菜单/命令行点开
+   ↓
+systemctl --user start va-capture     ← 交给 systemd 启动
+   ↓
+服务 cgroup 里跑 App（自带保护）
+   ├─ Restart=on-failure   崩溃 5 秒自动拉起
+   └─ MemoryMax=2G         录制缓存不会拖垮整机
 ```
 
-装完立即启动：`systemctl --user start va-capture`
+直接从菜单打开即可，不需要手动 enable 任何东西。
+没有 systemd 用户会话时会退化为直接运行。
+
+不想用服务方式时：
+
+```bash
+systemctl --user stop va-capture
+VA_CAPTURE_SERVICE=1 va-capture      # 直接跑（无内存上限）
+```
 
 > 想恢复原来的设备别名和保存路径？
 > 把旧电脑的 `~/.config/tinyvision-monitor.json` 拷到新电脑同路径即可。
