@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""用 PIL 生成多尺寸 PNG 图标。
+"""生成多尺寸 PNG 图标。
 
-设计：深色圆角渐变底 + 摄像头（镜头绿/蓝描边）+ 下方 8 点麦克风阵列环 + 中心红点。
-超采样 4x 再缩小，边缘平滑。
+构图：深色圆角渐变底
+      · 正中间：摄像头（机身 + 镜头）
+      · 周围一圈：8 颗麦克风，均匀分布成圆环
+      · 麦克风与镜头中心之间画一圈淡淡的引导弧，视觉上连成一个阵列
+
+用 4 倍超采样后缩小，任何尺寸边缘都平滑。
 """
 import math
 import os
 from PIL import Image, ImageDraw
 
 TOP = (36, 42, 56)
-BOT = (16, 19, 26)
-LENS_RING = (74, 222, 128)
-BODY_EDGE = (56, 189, 248)
-BODY_FILL = (44, 51, 68)
+BOT = (15, 18, 25)
+BODY = (44, 51, 68)
+EDGE = (56, 189, 248)
+LENS = (74, 222, 128)
 MIC = (250, 204, 21)
 RED = (248, 113, 113)
 
@@ -37,36 +41,47 @@ def render(size):
     img.paste(grad, (0, 0), mask)
     d = ImageDraw.Draw(img)
 
-    # ── 摄像头机身 ──
-    bx0, by0, bx1, by1 = int(S * .175), int(S * .215), int(S * .825), int(S * .525)
-    d.rounded_rectangle((bx0, by0, bx1, by1), radius=int(S * .085),
-                        fill=BODY_FILL, outline=BODY_EDGE,
-                        width=max(2, int(S * .018)))
+    cx = cy = S // 2
 
-    # ── 镜头（同心圆）──
-    cx, cy = (bx0 + bx1) // 2, (by0 + by1) // 2
-    r1 = int(S * .105)
-    d.ellipse((cx - r1, cy - r1, cx + r1, cy + r1),
-              fill=(13, 16, 22), outline=LENS_RING, width=max(3, int(S * .02)))
-    r2 = int(S * .052)
-    d.ellipse((cx - r2, cy - r2, cx + r2, cy + r2), fill=LENS_RING)
-    r3 = int(S * .020)
-    d.ellipse((cx - r3, cy - r3, cx + r3, cy + r3), fill=(13, 16, 22))
+    # ── 麦克风圆环的引导圈（很淡，只是把阵列"圈"起来）──
+    ring_r = int(S * 0.355)
+    d.ellipse((cx - ring_r, cy - ring_r, cx + ring_r, cy + ring_r),
+              outline=(70, 80, 100), width=max(2, int(S * 0.006)))
+
+    # ── 摄像头机身（水平放置，居中）──
+    bw, bh = int(S * 0.185), int(S * 0.112)
+    d.rounded_rectangle((cx - bw, cy - bh, cx + bw, cy + bh),
+                        radius=int(S * 0.045), fill=BODY,
+                        outline=EDGE, width=max(2, int(S * 0.016)))
+    # 右侧取景小凸起
+    d.rounded_rectangle((cx + bw - int(S * 0.010), cy - int(S * 0.048),
+                         cx + bw + int(S * 0.065), cy + int(S * 0.048)),
+                        radius=int(S * 0.020), fill=BODY, outline=EDGE,
+                        width=max(2, int(S * 0.014)))
+
+    # ── 镜头（同心圆，略偏机身左侧，看起来像相机）──
+    lx = cx - int(S * 0.050)
+    r1 = int(S * 0.072)
+    d.ellipse((lx - r1, cy - r1, lx + r1, cy + r1),
+              fill=(12, 15, 20), outline=LENS, width=max(3, int(S * 0.020)))
+    r2 = int(S * 0.035)
+    d.ellipse((lx - r2, cy - r2, lx + r2, cy + r2), fill=LENS)
+    r3 = int(S * 0.013)
+    d.ellipse((lx - r3, cy - r3, lx + r3, cy + r3), fill=(12, 15, 20))
 
     # ── 机身右上角的录制红点 ──
-    rx, ry, rr = int(S * .762), int(S * .285), max(3, int(S * .026))
+    rx, ry, rr = cx + int(S * 0.120), cy - int(S * 0.072), max(3, int(S * 0.021))
     d.ellipse((rx - rr, ry - rr, rx + rr, ry + rr), fill=RED)
 
-    # ── 8 点麦克风阵列 ──
-    mx, my = S // 2, int(S * .755)
-    ring = int(S * .150)
-    dot = max(3, int(S * .024))
+    # ── 8 颗麦克风：均匀分布在圆环上 ──
+    dot = max(3, int(S * 0.028))
     for i in range(8):
         a = math.radians(-90 + i * 45)
-        px, py = mx + ring * math.cos(a), my + ring * math.sin(a)
+        px, py = cx + ring_r * math.cos(a), cy + ring_r * math.sin(a)
+        # 深色描边让黄点在深底上更清晰
+        d.ellipse((px - dot - 2, py - dot - 2, px + dot + 2, py + dot + 2),
+                  fill=(22, 26, 34))
         d.ellipse((px - dot, py - dot, px + dot, py + dot), fill=MIC)
-    cr = max(3, int(S * .030))
-    d.ellipse((mx - cr, my - cr, mx + cr, my + cr), fill=RED)
 
     return img.resize((size, size), Image.LANCZOS)
 
