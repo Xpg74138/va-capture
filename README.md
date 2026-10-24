@@ -135,6 +135,31 @@ rtsp://<ip>:8554 ──┘                 ├─► seg_%03d.flac  (8 轨合并
 录制**其它设备**（非当前显示）时，仍然单独起一个进程 —— 因为那台设备
 本来就没有显示会话，总共也是 1 路客户端。
 
+## 后台常驻运行（推荐）
+
+长时间测试时，**不要从终端里直接启动** —— 终端的 cgroup 里若有别的程序
+吃光内存，`systemd-oomd` 会把整个 cgroup 杀掉，App 会被连带杀死
+（现场发生过：同一 cgroup 里某进程涨到 13 GB，App 一起被杀）。
+
+装成 systemd 用户服务即可，独立 cgroup + 崩溃自动重启 + 内存上限：
+
+```bash
+./scripts/install-service.sh          # 安装并启动
+systemctl --user status va-capture    # 看状态
+journalctl --user -u va-capture -f    # 看输出
+systemctl --user stop va-capture      # 停止
+./scripts/install-service.sh --remove # 卸载
+```
+
+服务配置要点：
+
+```ini
+Restart=on-failure      # 崩溃 5 秒后自动拉起
+MemoryHigh=1G           # 超过开始回收
+MemoryMax=2G            # 硬上限，绝不会拖垮整机
+OOMPolicy=stop
+```
+
 ## 日志（长期运行排错用）
 
 应用会把关键事件写到日志文件，便于事后倒查时间线：

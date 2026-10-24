@@ -1,0 +1,23 @@
+[Unit]
+Description=VA Capture 监看台
+Documentation=https://github.com/Xpg74138/va-capture
+After=graphical-session.target network-online.target
+
+[Service]
+Type=simple
+Environment=DISPLAY=:0
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@EXEC@
+Restart=on-failure
+RestartSec=5
+
+# 独立 cgroup + 内存上限：
+# 终端里跑时，App 和该终端的所有进程共用一个 cgroup，
+# 别的程序吃光内存会被 systemd-oomd 连带杀掉 App（现场发生过一次）。
+# 单独成组并限制上限，就不会被牵连，也不会拖垮整机。
+MemoryHigh=1G
+MemoryMax=2G
+OOMPolicy=stop
+
+[Install]
+WantedBy=graphical-session.target
