@@ -450,10 +450,11 @@ class App:
                                 f"reader_alive={bool(alive)} "
                                 f"stalled={getattr(self,'_stalled',False)} "
                                 f"age={age:.0f}ms", level="WARN")
+                        mem = self._mem_report()
                         flog.log(
                             f"stats: fps={self._fps_last:.1f} "
                             f"lag={('%.0fms' % lag) if lag >= 0 else 'n/a'} "
-                            f"audio={db:.1f}dB devs={devs or '-'}")
+                            f"audio={db:.1f}dB {mem} devs={devs or '-'}")
                     except Exception:
                         pass
                 self._dn = 0
@@ -648,6 +649,48 @@ class App:
         name = (f"<b>{a}</b> <span size='small' color='#8b93a3'>{d['host']}</span>"
                 if a else f"<b>{d['host']}</b>")
         return f"{mark}{name}　" + "　".join(bits)
+
+    def _mem_report(self):
+        """内存诊断串：App 自身 RSS + cgroup 的 anon/file/swap。
+
+        现场出现过"录制一段时间后界面卡死"，但看不出是程序堆还是文件页缓存
+        把 cgroup 撑满，所以每分钟把这些数都记下来。
+        """
+        out = []
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        out.append(f"rss={int(line.split()[1]) // 1024}MB")
+                        break
+        except Exception:
+            pass
+        try:
+            cg = ""
+            with open("/proc/self/cgroup") as f:
+                cg = f.readline().split(":", 2)[-1].strip()
+            base = "/sys/fs/cgroup" + cg
+            st = {}
+            with open(base + "/memory.stat") as f:
+                for line in f:
+                    k, v = line.split()
+                    if k in ("anon", "file", "slab", "kernel"):
+                        st[k] = int(v) // 1048576
+            cur = 0
+            with open(base + "/memory.current") as f:
+                cur = int(f.read()) // 1048576
+            sw = 0
+            try:
+                with open(base + "/memory.swap.current") as f:
+                    sw = int(f.read()) // 1048576
+            except Exception:
+                pass
+            out.append(f"cg={cur}MB(a{st.get('anon',0)}/f{st.get('file',0)})")
+            if sw:
+                out.append(f"swap={sw}MB")
+        except Exception:
+            pass
+        return " ".join(out)
 
     def _rec_tick(self):
         """每秒只刷新列表行的文字（不重建 ListBox，避免选中状态丢失）"""
@@ -1161,13 +1204,28 @@ class App:
             v = VideoReader(f"rtsp://{dev['host']}/live",
                             lambda pb, h=dev["host"], e=ep: self.on_frame(pb, h, e),
                             self.set_status, target=old.target,
-                            rec={"dir": d, "seg": seg_min * 60,
-                                 "audio": f"rtsp://{dev['host']}:8554/live"})
+                            rec={"dir": d, "seg": seg_min * 60})
             v.hwmode = old.hwmode
             v.transport = old.transport
             v.on_video_info = self.on_video_info
             dev["vreader"] = v
             v.start()
+
+            # 音频录制放到音频读取器里做（纯音频进程，内存零增长）。
+            # 以前把 8 路音频和视频塞进同一个 ffmpeg，实测 20MB/分钟线性上涨，
+            # 一两个小时就把 cgroup 撑爆被 SIGKILL —— 这就是"录制后卡死"的根因。
+            aold = dev.get("areader")
+            if aold is not None:
+                aold.stop()
+                time.sleep(0.2)
+            aep = dev.get("epoch", 0)
+            ar = AudioReader(f"rtsp://{dev['host']}:8554/live",
+                             lambda a, h=dev["host"], e=aep: self.on_audio(a, h, e),
+                             self.set_status, label=dev["host"],
+                             rec={"dir": d, "seg": seg_min * 60})
+            dev["areader"] = ar
+            ar.start()
+
             dev["rec_dir"] = d
             dev["rec_active"] = True
             dev["rec_start"] = time.time()
@@ -1195,26 +1253,31 @@ class App:
             #    视频用 TCP，录制容不得丢包。
             # 2) 分段 muxer 对"先视频后音频"的组合会失效（视频不分段），
             #    必须把音频输出放前面、视频输出放后面，两者才能都正常分段。
+            # 两个独立进程：视频一个、音频一个。
+            #
+            # 千万别合到一个进程里 —— 实测"视频解码 + 8 路 RTSP 音频"
+            # 同进程会让 ffmpeg 以 ~20MB/分钟线性吃内存，一两个小时
+            # 就把 cgroup 撑爆、进程被 SIGKILL（现场"录制后卡死"的根因）。
+            # 拆开后两边实测都是 0 增长。
             audio_map = "".join(f"[0:a:{i}]" for i in range(AUDIO_CH))
             lim = ["-t", str(int(total_h * 3600))] if total_h > 0 else []
-            cmd = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error",
-                   "-rtsp_transport", "udp", "-buffer_size", "1048576",
-                   "-i", f"rtsp://{self.host}:8554/live",
-                   "-rtsp_transport", "tcp", "-i", f"rtsp://{self.host}/live",
-                   # ① 音频：8 轨合并成 8 声道 WAV，分段
-                   "-filter_complex",
-                   f"{audio_map}amerge=inputs={AUDIO_CH}[a]",
-                   "-map", "[a]", "-c:a", "pcm_s16le",
-                   "-f", "segment", "-segment_time", str(seg),
-                   "-reset_timestamps", "1"] + lim + [
-                   os.path.join(d, "seg_%03d.wav"),
-                   # ② 视频：流拷贝（零画质损失），同名分段
-                   "-map", "1:v:0", "-c:v", "copy",
-                   "-f", "segment", "-segment_time", str(seg),
-                   "-reset_timestamps", "1"] + lim + [
-                   os.path.join(d, "seg_%03d.mp4")]
+            vcmd = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error",
+                    "-rtsp_transport", "tcp", "-i", f"rtsp://{self.host}/live",
+                    "-map", "0:v:0", "-c:v", "copy",
+                    "-f", "segment", "-segment_time", str(seg),
+                    "-reset_timestamps", "1"] + lim + [
+                    os.path.join(d, "seg_%03d.mp4")]
+            acmd = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error",
+                    "-rtsp_transport", "udp", "-buffer_size", "1048576",
+                    "-i", f"rtsp://{self.host}:8554/live",
+                    "-filter_complex",
+                    f"{audio_map}amerge=inputs={AUDIO_CH}[a]",
+                    "-map", "[a]", "-c:a", "pcm_s16le",
+                    "-f", "segment", "-segment_time", str(seg),
+                    "-reset_timestamps", "1"] + lim + [
+                    os.path.join(d, "seg_%03d.wav")]
 
-            dev["rec"] = subprocess.Popen(cmd)
+            dev["rec"] = [subprocess.Popen(vcmd), subprocess.Popen(acmd)]
             dev["rec_dir"] = d
             dev["rec_active"] = True
             dev["rec_start"] = time.time()
@@ -1283,33 +1346,53 @@ class App:
         v.on_video_info = self.on_video_info
         dev["vreader"] = v
         v.start()
+
+        # 音频读取器同样换回"不录像"的版本
+        aold = dev.get("areader")
+        if aold is not None:
+            aold.stop()
+            time.sleep(0.2)
+        dev["areader"] = AudioReader(
+            f"rtsp://{host}:8554/live",
+            lambda a, h=host, e=dev.get("epoch", 0): self.on_audio(a, h, e),
+            self.set_status, label=host)
+        dev["areader"].start()
+
         if dev.get("rec_dir"):
             self.log_line(f"{time.strftime('%H:%M:%S')}  -- ✓ 已保存 {dev['rec_dir']}")
             flog.log(f"停止录制（复用模式）: {dev['rec_dir']}")
         dev["rec_dir"] = ""
 
     def _kill_dev_rec(self, dev):
-        """只停止某台设备的录制"""
-        p = dev.get("rec")
-        if not p:
+        """只停止某台设备的录制（视频、音频各是一个进程）"""
+        procs = dev.get("rec")
+        if not procs:
             return
-        try:
-            p.send_signal(signal.SIGINT)
-            p.wait(timeout=3)
-        except Exception:
+        if not isinstance(procs, (list, tuple)):
+            procs = [procs]
+        for p in procs:
+            if p is None:
+                continue
             try:
-                p.kill()
+                p.send_signal(signal.SIGINT)
+                p.wait(timeout=3)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+            try:
+                self.recs.remove(p)
             except Exception:
                 pass
         dev["rec"] = None
-        try:
-            self.recs.remove(p)
-        except Exception:
-            pass
 
     def _kill_recs(self):
         # SIGINT 让 ffmpeg 正常收尾（写完 mp4 的 moov / wav 的头部）
-        for p in self.recs:
+        flat = []
+        for x in self.recs:
+            flat.extend(x if isinstance(x, (list, tuple)) else [x])
+        for p in flat:
             try:
                 p.send_signal(signal.SIGINT)
             except Exception:
@@ -1666,7 +1749,9 @@ def _acquire_single_instance():
     就会出现两个实例抢同一个设备的 RTSP 客户端（设备端是单客户端设计）。
     """
     import tempfile
-    path = os.path.join(tempfile.gettempdir(), "va-capture.lock")
+    # 允许测试时用独立锁文件，避免和生产实例互斥
+    path = os.environ.get("VA_CAPTURE_LOCK") or os.path.join(
+        tempfile.gettempdir(), "va-capture.lock")
     try:
         f = open(path, "w")
         fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

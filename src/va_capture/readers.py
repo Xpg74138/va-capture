@@ -287,9 +287,12 @@ class VideoReader(threading.Thread):
                    "-vf", f"scale={w}:{h}:flags=fast_bilinear",
                    "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
         if self.rec:
-            # 在同一个 ffmpeg 里追加两个输出（录像 mp4 + FLAC 音频），
-            # 原始帧输出仍是最后一个 "-"（stdout）
-            audio_url = self.rec.get("audio")
+            # 只追加"视频录像"输出（mp4 分段），音频录像交给 AudioReader。
+            #
+            # 千万别把 8 路音频也塞进这个进程：实测
+            #   "视频解码 + 8 路 RTSP 音频（amerge）" 同进程时 ffmpeg 内存
+            #   ～20MB/分钟 线性增长（纯视频 +0MB，纯音频 +0MB，合在一起就涨），
+            #   1~2 小时就把 cgroup 撑爆、进程被 SIGKILL，表现为"录制一段时间后卡死"。
             seg = int(self.rec.get("seg", 3600))
             d = self.rec["dir"]
             try:
@@ -303,32 +306,13 @@ class VideoReader(threading.Thread):
                                 and f.endswith(".mp4")])
             except Exception:
                 pass
-            # 把录像输入插在视频输入之后
-            idx = cmd.index("-i") + 2
-            rec_in = []
-            if audio_url:
-                rec_in = ["-rtsp_transport", "udp", "-buffer_size", "1048576",
-                          "-i", audio_url]
-            cmd = cmd[:idx] + rec_in + cmd[idx:]
-
-            graph = ""
-            amap = []
-            if audio_url:
-                graph = "".join(f"[1:a:{i}]" for i in range(AUDIO_CH))
-                graph += f"amerge=inputs={AUDIO_CH}[a]"
-                amap = ["-filter_complex", graph, "-map", "[a]",
-                        "-c:a", "flac", "-f", "segment",
-                        "-segment_time", str(seg),
-                        "-segment_start_number", str(start_no),
-                        os.path.join(d, "seg_%03d.flac")]
             rec_out = ["-map", "0:v", "-c", "copy",
                        "-f", "segment", "-segment_time", str(seg),
                        "-reset_timestamps", "1",
                        "-segment_start_number", str(start_no),
-                       os.path.join(d, "seg_%03d.mp4")] + amap
-            # 关键：录像输出必须插在 "-an -vf ... -f rawvideo" 这一组
-            # 「显示输出」选项之前，否则 -vf/-an 会被绑到 mp4 输出上，
-            # 导致 -c copy 与 -vf 冲突、ffmpeg 直接报错
+                       os.path.join(d, "seg_%03d.mp4")]
+            # 录像输出必须插在 "-an -vf ... rawvideo" 之前，
+            # 否则 -vf/-an 会绑到 mp4 输出上，-c copy 与 -vf 冲突直接报错
             ri = cmd.index("-an")
             cmd = cmd[:ri] + rec_out + cmd[ri:]
 
@@ -391,9 +375,12 @@ class VideoReader(threading.Thread):
 class AudioReader(threading.Thread):
     """ffmpeg -> s16le 8ch -> 电平 + 波形"""
 
-    def __init__(self, url, on_audio, on_status, label=None):
+    def __init__(self, url, on_audio, on_status, label=None, rec=None):
         super().__init__(daemon=True)
         self.url, self.on_audio, self.on_status = url, on_audio, on_status
+        # rec = {"dir": 目录, "seg": 分段秒数}
+        # 音频录像放在这个"纯音频"进程里做：它与视频解码分开后内存不再增长
+        self.rec = rec
         # 消息里带上设备地址：多设备时否则分不清是哪台在断
         self.label = label or url.split("//")[-1].split(":")[0]
         self._stop = threading.Event()
@@ -433,9 +420,28 @@ class AudioReader(threading.Thread):
         graph += f"amerge=inputs={AUDIO_CH}[a]"
         cmd = ["ffmpeg", "-nostdin", "-loglevel", "error",
                "-rtsp_transport", "udp", "-i", self.url,
-               "-filter_complex", graph, "-map", "[a]",
-               "-f", "s16le", "-acodec", "pcm_s16le",
-               "-ar", str(AUDIO_RATE), "-ac", str(AUDIO_CH), "-"]
+               "-filter_complex", graph, "-map", "[a]"]
+        if self.rec:
+            # 顺带把同一路音频录成 FLAC 分段文件。
+            # 放在这个"纯音频"进程里做：与视频解码分开后内存零增长，
+            # 合在一个进程里会以 ~20MB/分钟线性上涨（详见 VideoReader 里的注释）
+            d = self.rec["dir"]
+            try:
+                os.makedirs(d, exist_ok=True)
+            except Exception:
+                pass
+            start_no = 0
+            try:
+                start_no = len([f for f in os.listdir(d)
+                                if f.startswith("seg_") and f.endswith(".flac")])
+            except Exception:
+                pass
+            cmd += ["-c:a", "flac", "-f", "segment",
+                    "-segment_time", str(int(self.rec.get("seg", 3600))),
+                    "-segment_start_number", str(start_no),
+                    os.path.join(d, "seg_%03d.flac")]
+        cmd += ["-f", "s16le", "-acodec", "pcm_s16le",
+                "-ar", str(AUDIO_RATE), "-ac", str(AUDIO_CH), "-"]
         try:
             self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                          stderr=subprocess.DEVNULL,
