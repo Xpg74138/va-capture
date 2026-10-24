@@ -424,9 +424,14 @@ class AudioReader(threading.Thread):
             graph += f"amerge=inputs={AUDIO_CH},asplit=2[a][a_disp]"
         else:
             graph += f"amerge=inputs={AUDIO_CH}[a]"
+        # 注意：-map 只写一次，且必须紧挨着它所属的那一路输出。
+        # 之前构造时写了一次、追加时又写一次，不录制时同一个输出被 map 了两次，
+        # ffmpeg 直接报错退出 —— 表现就是"音频完全连不上"。
         cmd = ["ffmpeg", "-nostdin", "-loglevel", "error",
                "-rtsp_transport", "udp", "-i", self.url,
-               "-filter_complex", graph, "-map", "[a]"]
+               "-filter_complex", graph]
+        if not self.rec:
+            cmd += ["-map", "[a]"]
         if self.rec:
             # 顺带把同一路音频录成 FLAC 分段文件。
             # 放在这个"纯音频"进程里做：与视频解码分开后内存零增长，
@@ -442,12 +447,13 @@ class AudioReader(threading.Thread):
                                 if f.startswith("seg_") and f.endswith(".flac")])
             except Exception:
                 pass
-            cmd += ["-c:a", "flac", "-f", "segment",
+            # 输出①：录像文件
+            cmd += ["-map", "[a]", "-c:a", "flac", "-f", "segment",
                     "-segment_time", str(int(self.rec.get("seg", 3600))),
                     "-segment_start_number", str(start_no),
-                    os.path.join(d, "seg_%03d.flac")]
-        cmd += ["-map", "[a_disp]" if self.rec else "[a]",
-                "-f", "s16le", "-acodec", "pcm_s16le",
+                    os.path.join(d, "seg_%03d.flac"),
+                    "-map", "[a_disp]"]      # 输出② 的 map 紧跟在它前面
+        cmd += ["-f", "s16le", "-acodec", "pcm_s16le",
                 "-ar", str(AUDIO_RATE), "-ac", str(AUDIO_CH), "-"]
         try:
             self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
