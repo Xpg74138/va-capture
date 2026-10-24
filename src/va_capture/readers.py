@@ -417,7 +417,13 @@ class AudioReader(threading.Thread):
         # 8 条独立单声道 track 必须用 amerge 合成一条 8 通道流；
         # 只写 -ac 8 是错的（那只是把一条流重采样成 8 通道）。
         graph = "".join(f"[0:a:{i}]" for i in range(AUDIO_CH))
-        graph += f"amerge=inputs={AUDIO_CH}[a]"
+        if self.rec:
+            # 同一份 8 声道数据要喂给两路输出：录像文件 + 界面波形。
+            # 不 asplit 的话第二路输出没有 -map，ffmpeg 会自动选一路单声道，
+            # 表现就是"一录制备只能看到 1 路音频在动"
+            graph += f"amerge=inputs={AUDIO_CH},asplit=2[a][a_disp]"
+        else:
+            graph += f"amerge=inputs={AUDIO_CH}[a]"
         cmd = ["ffmpeg", "-nostdin", "-loglevel", "error",
                "-rtsp_transport", "udp", "-i", self.url,
                "-filter_complex", graph, "-map", "[a]"]
@@ -440,7 +446,8 @@ class AudioReader(threading.Thread):
                     "-segment_time", str(int(self.rec.get("seg", 3600))),
                     "-segment_start_number", str(start_no),
                     os.path.join(d, "seg_%03d.flac")]
-        cmd += ["-f", "s16le", "-acodec", "pcm_s16le",
+        cmd += ["-map", "[a_disp]" if self.rec else "[a]",
+                "-f", "s16le", "-acodec", "pcm_s16le",
                 "-ar", str(AUDIO_RATE), "-ac", str(AUDIO_CH), "-"]
         try:
             self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
