@@ -11,3 +11,4 @@ Terminal=false
 Categories=AudioVideo;Video;Audio;
 Keywords=camera;audio;rtsp;localization;tinvision;
 StartupNotify=true
+StartupWMClass=va-capture

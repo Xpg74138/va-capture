@@ -46,6 +46,14 @@ chmod 755 "$BUILD/usr/bin/va-capture"
 install -m 644 "$ROOT/packaging/va-capture.desktop" "$BUILD/usr/share/applications/"
 install -m 644 "$ROOT/packaging/va-capture.svg" \
     "$BUILD/usr/share/icons/hicolor/scalable/apps/va-capture.svg"
+# 多尺寸 PNG：部分桌面/任务栏对 SVG 支持不好，PNG 更稳
+for s in 48 64 128 256 512; do
+    src="$ROOT/packaging/icons/va-capture_${s}.png"
+    [ -f "$src" ] || continue
+    d="$BUILD/usr/share/icons/hicolor/${s}x${s}/apps"
+    mkdir -p "$d"
+    install -m 644 "$src" "$d/va-capture.png"
+done
 install -m 644 "$ROOT/packaging/va-capture.service" \
     "$BUILD/usr/lib/systemd/user/va-capture.service"
 install -m 644 "$ROOT/README.md" "$BUILD/usr/share/doc/va-capture/README.md"

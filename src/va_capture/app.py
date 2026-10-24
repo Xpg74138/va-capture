@@ -1679,6 +1679,16 @@ def _acquire_single_instance():
 
 def main():
     host = sys.argv[1] if len(sys.argv) > 1 else "192.168.2.2"
+    # 让窗口与 va-capture.desktop 关联起来：
+    # 不设的话 WM_CLASS 会是 "__main__.py"，任务栏只能显示通用/python 图标
+    try:
+        GLib.set_prgname("va-capture")
+        GLib.set_application_name("VA Capture")
+        Gdk.set_program_class("va-capture")
+        Gtk.Window.set_default_icon_name("va-capture")
+    except Exception:
+        pass
+
     _lock = _acquire_single_instance()
     if _lock is None:
         print("va-capture 已在运行（单实例保护），本次启动退出")
