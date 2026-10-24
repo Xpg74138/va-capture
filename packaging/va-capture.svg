@@ -11,26 +11,22 @@
   <rect x="11" y="11" width="234" height="234" rx="55" fill="url(#bg)"/>
 
   <!-- 麦克风阵列引导圈 -->
-  <circle cx="128" cy="128" r="91" fill="none" stroke="#46505f" stroke-width="1.6"/>
+  <circle cx="128" cy="128" r="92" fill="none" stroke="#46505f" stroke-width="1.6"/>
 
-  <!-- 摄像头机身 -->
-  <rect x="80" y="99" width="95" height="58" rx="14" fill="#2c3344" stroke="#38bdf8" stroke-width="4"/>
-  <!-- 取景凸起 -->
-  <rect x="171" y="112" width="20" height="32" rx="6" fill="#2c3344" stroke="#38bdf8" stroke-width="3.5"/>
+  <!-- 摄像头（圆形）：机身 -> 镜头 -> 瞳孔 -> 高光 -->
+  <circle cx="128" cy="128" r="40.5" fill="#2c3344" stroke="#38bdf8" stroke-width="5"/>
+  <circle cx="128" cy="128" r="26.4" fill="#0c0f14" stroke="#4ade80" stroke-width="5.6"/>
+  <circle cx="128" cy="128" r="12.3" fill="#4ade80"/>
+  <circle cx="128" cy="128" r="4.6" fill="#0c0f14"/>
 
-  <!-- 镜头 -->
-  <circle cx="115" cy="128" r="18.5" fill="#0c0f14" stroke="#4ade80" stroke-width="5"/>
-  <circle cx="115" cy="128" r="9" fill="#4ade80"/>
-  <circle cx="115" cy="128" r="3.4" fill="#0c0f14"/>
-
-  <!-- 录制红点 -->
-  <circle cx="159" cy="110" r="5.5" fill="#f87171"/>
+  <!-- 录制红点（机身右上 45 度） -->
+  <circle cx="156.5" cy="99.5" r="6.1" fill="#f87171"/>
 
   <!-- 8 颗麦克风 -->
   <g fill="#facc15">
-    <circle cx="128" cy="37" r="7.2"/><circle cx="192" cy="64" r="7.2"/>
-    <circle cx="219" cy="128" r="7.2"/><circle cx="192" cy="192" r="7.2"/>
-    <circle cx="128" cy="219" r="7.2"/><circle cx="64" cy="192" r="7.2"/>
-    <circle cx="37" cy="128" r="7.2"/><circle cx="64" cy="64" r="7.2"/>
+    <circle cx="128" cy="36" r="7.2"/><circle cx="193" cy="63" r="7.2"/>
+    <circle cx="220" cy="128" r="7.2"/><circle cx="193" cy="193" r="7.2"/>
+    <circle cx="128" cy="220" r="7.2"/><circle cx="63" cy="193" r="7.2"/>
+    <circle cx="36" cy="128" r="7.2"/><circle cx="63" cy="63" r="7.2"/>
   </g>
 </svg>

@@ -44,34 +44,31 @@ def render(size):
     cx = cy = S // 2
 
     # ── 麦克风圆环的引导圈（很淡，只是把阵列"圈"起来）──
-    ring_r = int(S * 0.355)
+    ring_r = int(S * 0.360)
     d.ellipse((cx - ring_r, cy - ring_r, cx + ring_r, cy + ring_r),
               outline=(70, 80, 100), width=max(2, int(S * 0.006)))
 
-    # ── 摄像头机身（水平放置，居中）──
-    bw, bh = int(S * 0.185), int(S * 0.112)
-    d.rounded_rectangle((cx - bw, cy - bh, cx + bw, cy + bh),
-                        radius=int(S * 0.045), fill=BODY,
-                        outline=EDGE, width=max(2, int(S * 0.016)))
-    # 右侧取景小凸起
-    d.rounded_rectangle((cx + bw - int(S * 0.010), cy - int(S * 0.048),
-                         cx + bw + int(S * 0.065), cy + int(S * 0.048)),
-                        radius=int(S * 0.020), fill=BODY, outline=EDGE,
-                        width=max(2, int(S * 0.014)))
+    # ── 摄像头：同心圆（圆形机身 + 镜头 + 瞳孔）──
+    r_body = int(S * 0.158)      # 机身外圈
+    d.ellipse((cx - r_body, cy - r_body, cx + r_body, cy + r_body),
+              fill=BODY, outline=EDGE, width=max(3, int(S * 0.020)))
 
-    # ── 镜头（同心圆，略偏机身左侧，看起来像相机）──
-    lx = cx - int(S * 0.050)
-    r1 = int(S * 0.072)
-    d.ellipse((lx - r1, cy - r1, lx + r1, cy + r1),
-              fill=(12, 15, 20), outline=LENS, width=max(3, int(S * 0.020)))
-    r2 = int(S * 0.035)
-    d.ellipse((lx - r2, cy - r2, lx + r2, cy + r2), fill=LENS)
-    r3 = int(S * 0.013)
-    d.ellipse((lx - r3, cy - r3, lx + r3, cy + r3), fill=(12, 15, 20))
+    r_lens = int(S * 0.103)      # 镜头环
+    d.ellipse((cx - r_lens, cy - r_lens, cx + r_lens, cy + r_lens),
+              fill=(12, 15, 20), outline=LENS, width=max(3, int(S * 0.022)))
+
+    r_pup = int(S * 0.048)       # 瞳
+    d.ellipse((cx - r_pup, cy - r_pup, cx + r_pup, cy + r_pup), fill=LENS)
+
+    r_hi = int(S * 0.018)        # 中心暗点（高光反光）
+    d.ellipse((cx - r_hi, cy - r_hi, cx + r_hi, cy + r_hi), fill=(12, 15, 20))
 
     # ── 机身右上角的录制红点 ──
-    rx, ry, rr = cx + int(S * 0.120), cy - int(S * 0.072), max(3, int(S * 0.021))
-    d.ellipse((rx - rr, ry - rr, rx + rr, ry + rr), fill=RED)
+    ang = math.radians(-45)
+    rr_dot = max(3, int(S * 0.024))
+    rx = cx + (r_body - int(S * 0.010)) * math.cos(ang)
+    ry = cy + (r_body - int(S * 0.010)) * math.sin(ang)
+    d.ellipse((rx - rr_dot, ry - rr_dot, rx + rr_dot, ry + rr_dot), fill=RED)
 
     # ── 8 颗麦克风：均匀分布在圆环上 ──
     dot = max(3, int(S * 0.028))
