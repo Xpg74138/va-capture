@@ -1400,9 +1400,16 @@ class App:
                 _aext = "flac"
             if _vc == "copy":
                 _venc = ["-c:v", "copy"]
+            elif _vc.startswith("x265_"):
+                _b = _vc.split("_", 1)[1]
+                _venc = ["-c:v", "libx265", "-preset", "ultrafast",
+                         "-x265-params", "log-level=error",
+                         "-b:v", _b, "-maxrate", _b, "-bufsize", "8M",
+                         "-pix_fmt", "yuv420p"]
             else:
+                _b = _vc.split("_", 1)[1] if "_" in _vc else _vc
                 _venc = ["-c:v", "libx264", "-preset", "ultrafast",
-                         "-b:v", _vc, "-maxrate", _vc, "-bufsize", "8M",
+                         "-b:v", _b, "-maxrate", _b, "-bufsize", "8M",
                          "-pix_fmt", "yuv420p"]
             vcmd = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error",
                     "-rtsp_transport", "tcp", "-i", f"rtsp://{self.host}/live",

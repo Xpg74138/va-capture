@@ -288,11 +288,15 @@ class SettingsDialog(Gtk.Dialog):
         # 视频编码
         grid.attach(Gtk.Label(label="录制视频", xalign=0), 0, r, 1, 1)
         self.cmb_vcodec = Gtk.ComboBoxText()
-        self.cmb_vcodec.append("copy", "直接复制（画质无损，4.4GB/小时）")
-        self.cmb_vcodec.append("4M", "压缩 4Mbps（1.6GB/小时）")
-        self.cmb_vcodec.append("2M", "压缩 2Mbps（0.9GB/小时）")
-        self.cmb_vcodec.append("1M", "压缩 1Mbps（0.4GB/小时，画质一般）")
-        self.cmb_vcodec.set_active_id(str(settings.get("rec_video_codec", "copy")))
+        self.cmb_vcodec.append("copy", "直接复制 H.264（无损，4.4GB/小时）")
+        self.cmb_vcodec.append("x264_4M", "H.264 4Mbps（1.6GB/小时）")
+        self.cmb_vcodec.append("x264_2M", "H.264 2Mbps（0.9GB/小时）")
+        self.cmb_vcodec.append("x265_2M", "H.265 2Mbps（0.9GB/小时，画质更好）")
+        self.cmb_vcodec.append("x265_1.3M", "H.265 1.3Mbps（0.6GB/小时，最小）")
+        _vc = str(settings.get("rec_video_codec", "copy"))
+        if _vc in ("4M", "2M", "1M"):
+            _vc = "x264_" + _vc
+        self.cmb_vcodec.set_active_id(_vc)
         grid.attach(self.cmb_vcodec, 1, r, 2, 1)
         r += 1
 
