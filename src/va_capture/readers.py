@@ -311,6 +311,13 @@ class VideoReader(threading.Thread):
             vcodec = (self.rec.get("vcodec") or "copy").strip()
             if vcodec == "copy":
                 venc = ["-c:v", "copy"]
+            elif vcodec.startswith("hw265_"):
+                # 硬件 H.265：解码/编码都在 GPU，实测整条链路 CPU 约 4%
+                # （软件 x265 是 230%）。需装 intel-media-va-driver-non-free。
+                br = vcodec.split("_", 1)[1]
+                venc = ["-vf", "format=nv12,hwupload",
+                        "-c:v", "hevc_vaapi", "-b:v", br,
+                        "-maxrate", br, "-bufsize", "8M"]
             elif vcodec.startswith("x265_"):
                 # 软编 H.265：同码率画质比 H.264 好约 30~40%，
                 # ultrafast 实测 2.4x 实时（两路录制 CPU 占用约 85% 单核等效）

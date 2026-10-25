@@ -1400,6 +1400,11 @@ class App:
                 _aext = "flac"
             if _vc == "copy":
                 _venc = ["-c:v", "copy"]
+            elif _vc.startswith("hw265_"):
+                _b = _vc.split("_", 1)[1]
+                _venc = ["-vf", "format=nv12,hwupload",
+                         "-c:v", "hevc_vaapi", "-b:v", _b,
+                         "-maxrate", _b, "-bufsize", "8M"]
             elif _vc.startswith("x265_"):
                 _b = _vc.split("_", 1)[1]
                 _venc = ["-c:v", "libx265", "-preset", "ultrafast",

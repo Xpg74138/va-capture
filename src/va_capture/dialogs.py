@@ -291,7 +291,9 @@ class SettingsDialog(Gtk.Dialog):
         self.cmb_vcodec.append("copy", "直接复制 H.264（无损，4.4GB/小时）")
         self.cmb_vcodec.append("x264_4M", "H.264 4Mbps（1.6GB/小时）")
         self.cmb_vcodec.append("x264_2M", "H.264 2Mbps（0.9GB/小时）")
-        self.cmb_vcodec.append("x265_2M", "H.265 2Mbps（0.9GB/小时，画质更好）")
+        self.cmb_vcodec.append("hw265_2M", "硬件 H.265 2Mbps（0.9GB/小时，几乎不占 CPU）")
+        self.cmb_vcodec.append("hw265_4M", "硬件 H.265 4Mbps（1.8GB/小时，更清晰）")
+        self.cmb_vcodec.append("x265_2M", "软件 H.265 2Mbps（0.9GB/小时，CPU 约 2.3 核）")
         self.cmb_vcodec.append("x265_1.3M", "H.265 1.3Mbps（0.6GB/小时，最小）")
         _vc = str(settings.get("rec_video_codec", "copy"))
         if _vc in ("4M", "2M", "1M"):
