@@ -143,9 +143,18 @@ class App:
         vbox.pack_start(bar, False, False, 0)
 
         # ---- 主区 ----
-        paned = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        paned.set_margin_start(8)
-        paned.set_margin_end(8)
+        # 用 Gtk.Grid 分两列：
+        #   第 0 列 = 视频 / （下行）设备列表 + 波形
+        #   第 1 列 = 右栏 / （下行）方位罗盘
+        # 同一列里的两个组件共享列宽（取两者自然宽度的大者），
+        # 所以罗盘和上面的面板必然同宽、右边缘对齐 —— 不靠写死像素去凑。
+        # 这是 GTK 里做对齐的标准做法（同列 = 同宽）。
+        grid = Gtk.Grid()
+        grid.set_column_spacing(10)
+        grid.set_row_spacing(8)
+        grid.set_margin_start(10)
+        grid.set_margin_end(8)
+        grid.set_margin_top(6)
 
         self.video = Gtk.Image()
         self.video.set_size_request(960, 540)
@@ -166,10 +175,13 @@ class App:
         # 提示标签创建时就是可见的，标志必须先置 True，
         # 否则显示循环里"收到第一帧就隐藏"的逻辑永远不会执行（旧版遗留 bug）
         self._hint_visible = True
-        paned.pack_start(_ov, True, True, 0)
+        _ov.set_hexpand(True)
+        _ov.set_vexpand(True)
+        grid.attach(_ov, 0, 0, 1, 1)
 
         right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        right.set_size_request(PANEL_W + 6, -1)   # 与 PANEL_W 对齐
+        right.set_size_request(PANEL_W, -1)       # 只定最小宽度，实际列宽由 Grid 计算
+        right.set_valign(Gtk.Align.START)
         self.levels = Levels(self.settings.get("meter_floor", -60))
         right.pack_start(titled("电平表", self.levels), False, False, 0)
 
@@ -221,20 +233,13 @@ class App:
         self.lbl_cal.set_size_request(PANEL_W - 12, 18)
         azbox.pack_start(self.lbl_cal, False, False, 0)
         right.pack_start(titled("方位", azbox), False, False, 0)
-
         right.set_hexpand(False)
-        paned.pack_end(right, False, False, 0)
-        paned.set_margin_start(10)
-        paned.set_margin_end(6)
-        paned.set_margin_top(6)
-        vbox.pack_start(paned, True, True, 0)
+        grid.attach(right, 1, 0, 1, 1)
 
-        # ---- 底部一行：设备列表 | 波形 | 罗盘（同一水平高度）----
+        vbox.pack_start(grid, True, True, 0)
+
+        # ---- 底部一行：设备列表 | 波形（第 0 列）----
         bottom = Gtk.Box(spacing=10)
-        bottom.set_margin_start(10)
-        bottom.set_margin_end(10)
-        bottom.set_margin_top(6)
-        bottom.set_margin_bottom(4)
 
         # 设备列表：和波形同一行，放在最左边
         devbox = Gtk.Frame()
@@ -260,11 +265,24 @@ class App:
         wf = titled("8 通道波形", self.wave)
         wf.set_size_request(-1, -1)
         bottom.pack_start(wf, True, True, 0)
+        grid.attach(bottom, 0, 1, 1, 1)
 
+        # 罗盘放在第 1 列（右栏正下方）—— 宽度由 Grid 与右栏统一，右边缘自动对齐
         self.compass = Compass()
+        self.compass.set_halign(Gtk.Align.CENTER)
         self.compass.set_valign(Gtk.Align.CENTER)
-        bottom.pack_end(titled("方位罗盘", self.compass), False, False, 0)
-        vbox.pack_start(bottom, False, False, 0)
+        _cf = titled("方位罗盘", self.compass)
+        _cf.set_valign(Gtk.Align.CENTER)
+        _cf.set_hexpand(True)
+        grid.attach(_cf, 1, 1, 1, 1)
+
+        # GTK 的标准做法：SizeGroup 让两个控件共享同一宽度。
+        # 右栏和罗盘框同处第 1 列，再绑一个横向 SizeGroup，
+        # 两者的宽度就由布局系统取最大值统一决定 —— 不写死像素，
+        # 换字体/换主题/缩放变化时也始终对齐。
+        _sg = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
+        _sg.add_widget(right)
+        _sg.add_widget(_cf)
 
         # ---- 状态栏 ----
         # 不用 Gtk.Statusbar：它的最小宽度等于当前消息宽度，
