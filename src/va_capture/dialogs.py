@@ -299,10 +299,11 @@ class SettingsDialog(Gtk.Dialog):
         # 音频编码
         grid.attach(Gtk.Label(label="音频编码", xalign=0), 0, r, 1, 1)
         self.cmb_acodec = Gtk.ComboBoxText()
-        self.cmb_acodec.append("flac", "FLAC 无损（1.7GB/小时）")
-        self.cmb_acodec.append("opus", "Opus 512k（0.19GB/小时，8 声道）")
+        # 音频不做有损压缩：8 轨 FLAC 无损，保留完整相位/强度信息供定位分析
+        self.cmb_acodec.append("flac", "FLAC 无损 8 声道（1.7GB/小时，推荐）")
         self.cmb_acodec.append("wav", "WAV 未压缩（3.5GB/小时）")
-        self.cmb_acodec.set_active_id(str(settings.get("rec_audio_codec", "flac")))
+        _ac = str(settings.get("rec_audio_codec", "flac"))
+        self.cmb_acodec.set_active_id(_ac if _ac in ("flac", "wav") else "flac")
         grid.attach(self.cmb_acodec, 1, r, 2, 1)
         r += 1
 
