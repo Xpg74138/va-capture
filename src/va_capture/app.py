@@ -650,6 +650,86 @@ class App:
                 if a else f"<b>{d['host']}</b>")
         return f"{mark}{name}　" + "　".join(bits)
 
+    def _free_gb(self, path=None):
+        """录制目录所在分区剩余空间（GB）"""
+        try:
+            import shutil
+            p = path or self._outdir("recordings")
+            return shutil.disk_usage(p).free / 1073741824.0
+        except Exception:
+            return 999.0
+
+    def _min_free_gb(self):
+        try:
+            return float(self.settings.get("rec_min_free_gb", 2) or 0)
+        except Exception:
+            return 2.0
+
+    def _check_recorders_alive(self):
+        """后台录制是"视频进程 + 音频进程"，任一意外退出就整体停掉。
+
+        否则会出现"画面没了、声音还在录"的半残状态，而且很难被发现。
+        （复用模式的录制跑在读取器里，读取器本来就会自动重连，不在此列。）
+        """
+        for h, d in list(self.devices.items()):
+            procs = d.get("rec")
+            if not d.get("rec_active") or not isinstance(procs, (list, tuple)):
+                continue
+            dead = [p for p in procs if p is not None and p.poll() is not None]
+            if not dead:
+                continue
+            flog.log(f"录制进程意外退出（{h}），停止整台设备的录制: "
+                     f"rc={[p.returncode for p in dead]}")
+            self.log_line(
+                f"{time.strftime('%H:%M:%S')}  -- ⚠ 录制进程退出，"
+                f"已停止 {h} 的录制（音视频一起停）")
+            try:
+                self._stop_dev_rec(d)
+            except Exception:
+                pass
+            self._sync_rec_button()
+            self._update_device_list()
+
+    def _check_space_and_stop(self):
+        """空间不足时把**所有**录制一起停掉。
+
+        以前只有视频那一路会失败退出，音频还在继续录，结果是
+        "只剩声音没有画面"的半残状态，很难发现。这里统一处理：
+        空间低于阈值 → 停掉全部设备的录制，并在界面和日志里说清楚。
+        """
+        recs = [h for h, d in self.devices.items() if d.get("rec_active")]
+        if not recs:
+            return
+        need = self._min_free_gb()
+        if need <= 0:
+            return
+        free = self._free_gb(self.devices[recs[0]].get("rec_dir"))
+        if free >= need:
+            return
+        for h in recs:
+            d = self.devices[h]
+            flog.log(f"空间不足（剩 {free:.1f} GB < {need:.0f} GB），"
+                     f"自动停止录制: {h}")
+            self.log_line(
+                f"{time.strftime('%H:%M:%S')}  -- ⚠ 空间不足（剩 {free:.1f} GB），"
+                f"已停止 {h} 的录制（音视频一起停）")
+            try:
+                self._stop_dev_rec(d)
+            except Exception as e:
+                flog.log(f"停止录制失败 {h}: {e}")
+        self.set_status(f"⚠ 磁盘剩余 {free:.1f} GB，已自动停止录制")
+        self._sync_rec_button()
+        self._update_device_list()
+
+    def _stop_dev_rec(self, dev):
+        """停掉一台设备的录制（复用模式换回纯显示 / 后台模式杀进程）"""
+        if dev.get("rec") is None and dev.get("vreader") and dev.get("rec_active"):
+            self._restart_reader_plain(dev)
+        else:
+            self._kill_dev_rec(dev)
+        dev["rec_active"] = False
+        dev["rec_start"] = None
+
     def _mem_report(self):
         """内存诊断串：App 自身 RSS + cgroup 的 anon/file/swap。
 
@@ -693,8 +773,13 @@ class App:
         return " ".join(out)
 
     def _rec_tick(self):
-        """每秒只刷新列表行的文字（不重建 ListBox，避免选中状态丢失）"""
+        """每秒刷新列表行文字；每 10 秒检查一次磁盘空间"""
         try:
+            self._tick_n = getattr(self, "_tick_n", 0) + 1
+            if self._tick_n % 5 == 0:
+                self._check_recorders_alive()
+            if self._tick_n % 10 == 0:
+                self._check_space_and_stop()
             for row in self.dev_rows.get_children():
                 d = self.devices.get(getattr(row, "host", ""))
                 lbl = getattr(row, "label", None)
@@ -1111,7 +1196,7 @@ class App:
     def _compress_closed_segments(self, d, final=False):
         """把已写完的 seg_NNN.wav 转成 seg_NNN.flac 并删除 wav，返回剩余数量"""
         import glob
-        files = sorted(glob.glob(os.path.join(d, "seg_*.wav")))
+        files = sorted(glob.glob(os.path.join(d, "*.wav")))
         if not files:
             return 0
         idxs = []
@@ -1141,7 +1226,7 @@ class App:
                     os.remove(f)
             except Exception:
                 pass
-        return len(glob.glob(os.path.join(d, "seg_*.wav")))
+        return len(glob.glob(os.path.join(d, "*.wav")))
 
     def _flac_loop(self, d):
         while True:
@@ -1177,6 +1262,19 @@ class App:
             return
         dev = self._dev()
 
+        # 开始录制前先看空间够不够（放不住就不开始，免得录出半截文件）
+        if btn.get_active():
+            need = self._min_free_gb()
+            free = self._free_gb(self._outdir("recordings"))
+            if need > 0 and free < need:
+                self._rec_guard = True
+                btn.set_active(False)
+                self._rec_guard = False
+                self.set_status(
+                    f"⚠ 磁盘剩余 {free:.1f} GB，不足 {need:.0f} GB，无法开始录制")
+                flog.log(f"拒绝开始录制: 剩余 {free:.1f} GB < {need:.0f} GB")
+                return
+
         # ── 复用模式 ──────────────────────────────────────────────
         # 如果录的就是"当前显示"的设备，它已经有一路视频会话了。
         # 再起一个 ffmpeg 就是第二路客户端 —— 而设备端视频服务是单客户端
@@ -1201,10 +1299,11 @@ class App:
             # 表现就是「一点录制，音频实时显示就没了」。
             # 旧视频读取器已经 stop()，不会有残留帧污染。
             ep = dev.get("epoch", 0)
+            stamp = os.path.basename(d)        # 目录名就是开始时间 20261025_102401
             v = VideoReader(f"rtsp://{dev['host']}/live",
                             lambda pb, h=dev["host"], e=ep: self.on_frame(pb, h, e),
                             self.set_status, target=old.target,
-                            rec={"dir": d, "seg": seg_min * 60})
+                            rec={"dir": d, "seg": seg_min * 60, "prefix": stamp})
             v.hwmode = old.hwmode
             v.transport = old.transport
             v.on_video_info = self.on_video_info
@@ -1222,7 +1321,7 @@ class App:
             ar = AudioReader(f"rtsp://{dev['host']}:8554/live",
                              lambda a, h=dev["host"], e=aep: self.on_audio(a, h, e),
                              self.set_status, label=dev["host"],
-                             rec={"dir": d, "seg": seg_min * 60})
+                             rec={"dir": d, "seg": seg_min * 60, "prefix": stamp})
             dev["areader"] = ar
             ar.start()
 
@@ -1261,12 +1360,13 @@ class App:
             # 拆开后两边实测都是 0 增长。
             audio_map = "".join(f"[0:a:{i}]" for i in range(AUDIO_CH))
             lim = ["-t", str(int(total_h * 3600))] if total_h > 0 else []
+            stamp = os.path.basename(d)
             vcmd = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error",
                     "-rtsp_transport", "tcp", "-i", f"rtsp://{self.host}/live",
                     "-map", "0:v:0", "-c:v", "copy",
                     "-f", "segment", "-segment_time", str(seg),
                     "-reset_timestamps", "1"] + lim + [
-                    os.path.join(d, "seg_%03d.mp4")]
+                    os.path.join(d, f"{stamp}_%03d.mp4")]
             acmd = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error",
                     "-rtsp_transport", "udp", "-buffer_size", "1048576",
                     "-i", f"rtsp://{self.host}:8554/live",
@@ -1275,7 +1375,7 @@ class App:
                     "-map", "[a]", "-c:a", "pcm_s16le",
                     "-f", "segment", "-segment_time", str(seg),
                     "-reset_timestamps", "1"] + lim + [
-                    os.path.join(d, "seg_%03d.wav")]
+                    os.path.join(d, f"{stamp}_%03d.wav")]
 
             dev["rec"] = [subprocess.Popen(vcmd), subprocess.Popen(acmd)]
             dev["rec_dir"] = d
@@ -1297,13 +1397,7 @@ class App:
                 f"{'不限时长' if total_h <= 0 else f'{total_h:g} 小时'}，"
                 f"约 {est:.1f} GB/小时")
         else:
-            if dev.get("rec") is None and dev.get("vreader") and dev.get("rec_active"):
-                # 复用模式：停掉带录像输出的读取器，恢复成纯显示
-                self._restart_reader_plain(dev)
-            else:
-                self._kill_dev_rec(dev)
-            dev["rec_active"] = False
-            dev["rec_start"] = None
+            self._stop_dev_rec(dev)
             self._update_device_list()
             self._sync_rec_button()
             btn.set_label("录制音视频")

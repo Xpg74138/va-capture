@@ -271,6 +271,13 @@ class SettingsDialog(Gtk.Dialog):
         grid.attach(Gtk.Label(label="分钟/段"), 2, r, 1, 1)
         r += 1
 
+        grid.attach(Gtk.Label(label="空间不足即停", xalign=0), 0, r, 1, 1)
+        self.spin_free = Gtk.SpinButton.new_with_range(0, 200, 1)
+        self.spin_free.set_value(int(settings.get("rec_min_free_gb", 2) or 0))
+        grid.attach(self.spin_free, 1, r, 1, 1)
+        grid.attach(Gtk.Label(label="GB（低于此值自动停止录制）"), 2, r, 1, 1)
+        r += 1
+
         grid.attach(Gtk.Label(label="录制总时长", xalign=0), 0, r, 1, 1)
         self.spin_total = Gtk.SpinButton.new_with_range(0, 720, 1)
         self.spin_total.set_value(int(settings.get("rec_total_hours", 0) or 0))
@@ -416,6 +423,7 @@ class SettingsDialog(Gtk.Dialog):
             "transport": self.cmb_tp.get_active_id() or "udp",
             "rec_segment_min": int(self.spin_seg.get_value()),
             "rec_total_hours": int(self.spin_total.get_value()),
+            "rec_min_free_gb": int(self.spin_free.get_value()),
             "rec_audio_codec": self.cmb_acodec.get_active_id() or "flac",
         }
 

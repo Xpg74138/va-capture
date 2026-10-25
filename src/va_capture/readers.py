@@ -300,17 +300,19 @@ class VideoReader(threading.Thread):
             except Exception:
                 pass
             # 续接分段编号，避免重连后从 000 覆盖已有文件
+            prefix = self.rec.get("prefix") or "seg"
             start_no = 0
             try:
-                start_no = len([f for f in os.listdir(d) if f.startswith("seg_")
-                                and f.endswith(".mp4")])
+                # 续接分段编号（只数本前缀的文件）
+                start_no = len([f for f in os.listdir(d)
+                                if f.startswith(prefix) and f.endswith(".mp4")])
             except Exception:
                 pass
             rec_out = ["-map", "0:v", "-c", "copy",
                        "-f", "segment", "-segment_time", str(seg),
                        "-reset_timestamps", "1",
                        "-segment_start_number", str(start_no),
-                       os.path.join(d, "seg_%03d.mp4")]
+                       os.path.join(d, prefix + "_%03d.mp4")]
             # 录像输出必须插在 "-an -vf ... rawvideo" 之前，
             # 否则 -vf/-an 会绑到 mp4 输出上，-c copy 与 -vf 冲突直接报错
             ri = cmd.index("-an")
@@ -441,17 +443,18 @@ class AudioReader(threading.Thread):
                 os.makedirs(d, exist_ok=True)
             except Exception:
                 pass
+            prefix = self.rec.get("prefix") or "seg"
             start_no = 0
             try:
                 start_no = len([f for f in os.listdir(d)
-                                if f.startswith("seg_") and f.endswith(".flac")])
+                                if f.startswith(prefix) and f.endswith(".flac")])
             except Exception:
                 pass
             # 输出①：录像文件
             cmd += ["-map", "[a]", "-c:a", "flac", "-f", "segment",
                     "-segment_time", str(int(self.rec.get("seg", 3600))),
                     "-segment_start_number", str(start_no),
-                    os.path.join(d, "seg_%03d.flac"),
+                    os.path.join(d, prefix + "_%03d.flac"),
                     "-map", "[a_disp]"]      # 输出② 的 map 紧跟在它前面
         cmd += ["-f", "s16le", "-acodec", "pcm_s16le",
                 "-ar", str(AUDIO_RATE), "-ac", str(AUDIO_CH), "-"]
