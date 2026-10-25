@@ -1318,10 +1318,16 @@ class App:
             # 旧视频读取器已经 stop()，不会有残留帧污染。
             ep = dev.get("epoch", 0)
             stamp = os.path.basename(d)        # 目录名就是开始时间 20261025_102401
+            # 录制编码参数（见设置里的"视频编码 / 音频编码"）
+            _vc = str(self.settings.get("rec_video_codec", "copy") or "copy")
+            _ac = str(self.settings.get("rec_audio_codec", "flac") or "flac")
+            _ab = str(self.settings.get("rec_audio_bitrate", "512k") or "512k")
+            _rec_opts = {"prefix": stamp, "seg": seg_min * 60,
+                         "vcodec": _vc, "acodec": _ac, "abitrate": _ab}
             v = VideoReader(f"rtsp://{dev['host']}/live",
                             lambda pb, h=dev["host"], e=ep: self.on_frame(pb, h, e),
                             self.set_status, target=old.target,
-                            rec={"dir": d, "seg": seg_min * 60, "prefix": stamp})
+                            rec=dict(_rec_opts, dir=d))
             v.hwmode = old.hwmode
             v.transport = old.transport
             v.on_video_info = self.on_video_info
@@ -1339,7 +1345,7 @@ class App:
             ar = AudioReader(f"rtsp://{dev['host']}:8554/live",
                              lambda a, h=dev["host"], e=aep: self.on_audio(a, h, e),
                              self.set_status, label=dev["host"],
-                             rec={"dir": d, "seg": seg_min * 60, "prefix": stamp})
+                             rec=dict(_rec_opts, dir=d))
             dev["areader"] = ar
             ar.start()
 
@@ -1379,9 +1385,28 @@ class App:
             audio_map = "".join(f"[0:a:{i}]" for i in range(AUDIO_CH))
             lim = ["-t", str(int(total_h * 3600))] if total_h > 0 else []
             stamp = os.path.basename(d)
+            _vc = str(self.settings.get("rec_video_codec", "copy") or "copy")
+            _ac = str(self.settings.get("rec_audio_codec", "flac") or "flac")
+            _ab = str(self.settings.get("rec_audio_bitrate", "512k") or "512k")
+            if _ac == "opus":
+                _aenc = ["-c:a", "libopus", "-b:a", _ab,
+                         "-application", "audio", "-vbr", "on"]
+                _aext = "opus"
+            elif _ac == "wav":
+                _aenc = ["-c:a", "pcm_s16le"]
+                _aext = "wav"
+            else:
+                _aenc = ["-c:a", "flac"]
+                _aext = "flac"
+            if _vc == "copy":
+                _venc = ["-c:v", "copy"]
+            else:
+                _venc = ["-c:v", "libx264", "-preset", "ultrafast",
+                         "-b:v", _vc, "-maxrate", _vc, "-bufsize", "8M",
+                         "-pix_fmt", "yuv420p"]
             vcmd = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error",
                     "-rtsp_transport", "tcp", "-i", f"rtsp://{self.host}/live",
-                    "-map", "0:v:0", "-c:v", "copy",
+                    "-map", "0:v:0"] + _venc + [
                     "-f", "segment", "-segment_time", str(seg),
                     "-reset_timestamps", "1"] + lim + [
                     os.path.join(d, f"{stamp}_%03d.mp4")]
@@ -1390,10 +1415,10 @@ class App:
                     "-i", f"rtsp://{self.host}:8554/live",
                     "-filter_complex",
                     f"{audio_map}amerge=inputs={AUDIO_CH}[a]",
-                    "-map", "[a]", "-c:a", "pcm_s16le",
+                    "-map", "[a]"] + _aenc + [
                     "-f", "segment", "-segment_time", str(seg),
                     "-reset_timestamps", "1"] + lim + [
-                    os.path.join(d, f"{stamp}_%03d.wav")]
+                    os.path.join(d, f"{stamp}_%03d.{_aext}")]
 
             dev["rec"] = [subprocess.Popen(vcmd), subprocess.Popen(acmd)]
             dev["rec_dir"] = d

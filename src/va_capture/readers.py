@@ -308,7 +308,15 @@ class VideoReader(threading.Thread):
                                 if f.startswith(prefix) and f.endswith(".mp4")])
             except Exception:
                 pass
-            rec_out = ["-map", "0:v", "-c", "copy",
+            vcodec = (self.rec.get("vcodec") or "copy").strip()
+            if vcodec == "copy":
+                venc = ["-c:v", "copy"]
+            else:
+                # 软编：x264 ultrafast 实测 ~5.7x 实时，两路录制也只占 ~35% CPU
+                venc = ["-c:v", "libx264", "-preset", "ultrafast",
+                        "-b:v", vcodec, "-maxrate", vcodec,
+                        "-bufsize", "8M", "-pix_fmt", "yuv420p"]
+            rec_out = ["-map", "0:v"] + venc + [
                        "-f", "segment", "-segment_time", str(seg),
                        "-reset_timestamps", "1",
                        "-segment_start_number", str(start_no),
@@ -450,11 +458,23 @@ class AudioReader(threading.Thread):
                                 if f.startswith(prefix) and f.endswith(".flac")])
             except Exception:
                 pass
-            # 输出①：录像文件
-            cmd += ["-map", "[a]", "-c:a", "flac", "-f", "segment",
+            # 输出①：录像文件（编码器可选 flac / wav / opus）
+            acodec = (self.rec.get("acodec") or "flac").strip()
+            if acodec == "opus":
+                # 8 声道 Opus：实测 512k 约 0.19 GB/小时（FLAC 是 1.72 GB/小时）
+                aenc = ["-c:a", "libopus", "-b:a",
+                        str(self.rec.get("abitrate") or "512k"),
+                        "-application", "audio", "-vbr", "on"]
+            elif acodec == "wav":
+                aenc = ["-c:a", "pcm_s16le"]
+            else:
+                aenc = ["-c:a", "flac"]
+            cmd += ["-map", "[a]"] + aenc + ["-f", "segment",
                     "-segment_time", str(int(self.rec.get("seg", 3600))),
                     "-segment_start_number", str(start_no),
-                    os.path.join(d, prefix + "_%03d.flac"),
+                    os.path.join(d, prefix + "_%03d." +
+                                 ("opus" if acodec == "opus"
+                                  else ("wav" if acodec == "wav" else "flac"))),
                     "-map", "[a_disp]"]      # 输出② 的 map 紧跟在它前面
         cmd += ["-f", "s16le", "-acodec", "pcm_s16le",
                 "-ar", str(AUDIO_RATE), "-ac", str(AUDIO_CH), "-"]

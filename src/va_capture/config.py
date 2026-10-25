@@ -10,6 +10,10 @@ from .constants import *
 from .constants import AUDIO_CH, DEFAULT_SETTINGS, PANEL_W
 
 def _config_path():
+    # 测试/多实例时可用环境变量指定独立配置文件，避免污染真实配置
+    env = os.environ.get("VA_CAPTURE_CONFIG")
+    if env:
+        return env
     here = os.path.dirname(os.path.abspath(__file__))
     for d in (os.path.expanduser("~/.config"), here):
         try:

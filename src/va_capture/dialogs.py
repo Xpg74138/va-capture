@@ -285,11 +285,23 @@ class SettingsDialog(Gtk.Dialog):
         grid.attach(Gtk.Label(label="小时（0=不限）"), 2, r, 1, 1)
         r += 1
 
+        # 视频编码
+        grid.attach(Gtk.Label(label="录制视频", xalign=0), 0, r, 1, 1)
+        self.cmb_vcodec = Gtk.ComboBoxText()
+        self.cmb_vcodec.append("copy", "直接复制（画质无损，4.4GB/小时）")
+        self.cmb_vcodec.append("4M", "压缩 4Mbps（1.6GB/小时）")
+        self.cmb_vcodec.append("2M", "压缩 2Mbps（0.9GB/小时）")
+        self.cmb_vcodec.append("1M", "压缩 1Mbps（0.4GB/小时，画质一般）")
+        self.cmb_vcodec.set_active_id(str(settings.get("rec_video_codec", "copy")))
+        grid.attach(self.cmb_vcodec, 1, r, 2, 1)
+        r += 1
+
         # 音频编码
         grid.attach(Gtk.Label(label="音频编码", xalign=0), 0, r, 1, 1)
         self.cmb_acodec = Gtk.ComboBoxText()
-        self.cmb_acodec.append("flac", "FLAC 无损压缩（省约 49%，推荐）")
-        self.cmb_acodec.append("wav", "WAV 未压缩（最大）")
+        self.cmb_acodec.append("flac", "FLAC 无损（1.7GB/小时）")
+        self.cmb_acodec.append("opus", "Opus 512k（0.19GB/小时，8 声道）")
+        self.cmb_acodec.append("wav", "WAV 未压缩（3.5GB/小时）")
         self.cmb_acodec.set_active_id(str(settings.get("rec_audio_codec", "flac")))
         grid.attach(self.cmb_acodec, 1, r, 2, 1)
         r += 1
@@ -424,6 +436,8 @@ class SettingsDialog(Gtk.Dialog):
             "rec_segment_min": int(self.spin_seg.get_value()),
             "rec_total_hours": int(self.spin_total.get_value()),
             "rec_min_free_gb": int(self.spin_free.get_value()),
+            "rec_video_codec": self.cmb_vcodec.get_active_id() or "copy",
+            "rec_audio_bitrate": "512k",
             "rec_audio_codec": self.cmb_acodec.get_active_id() or "flac",
         }
 
