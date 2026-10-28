@@ -439,7 +439,27 @@ class AudioReader(threading.Thread):
                     f"{self.label} 音频断开，{delay} 秒后重连… (第 {self._retry} 次)")
             time.sleep(delay)
 
+    def _sync_device_time(self):
+        """把电脑的时间推给板子（板子没有 RTC，开机永远是 1970）
+
+        rtsp-av 收到 `SET_PARAMETER ... TV-TIME: <unix>` 会调 settimeofday，
+        这样设备日志里的时间戳才可读。失败无所谓，忽略即可。
+        """
+        try:
+            host = self.url.split("//")[-1].split(":")[0]
+            port = self.url.split(":")[-1].split("/")[0]
+            import socket
+            n = int(time.time())
+            msg = (f"SET_PARAMETER rtsp://{host}:{port}/live RTSP/1.0\r\n"
+                   f"CSeq: 1\r\nTV-TIME: {n}\r\n\r\n").encode()
+            with socket.create_connection((host, int(port)), timeout=2) as sk:
+                sk.sendall(msg)
+                sk.recv(256)
+        except Exception:
+            pass
+
     def _run_once(self):
+        self._sync_device_time()
         # 8 条独立单声道 track 必须用 amerge 合成一条 8 通道流；
         # 只写 -ac 8 是错的（那只是把一条流重采样成 8 通道）。
         graph = "".join(f"[0:a:{i}]" for i in range(AUDIO_CH))
