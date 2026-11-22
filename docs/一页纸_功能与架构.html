@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>八通道声源定位监控系统 — 功能与架构</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 14px/1.6 -apple-system, "Segoe UI", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+         color:#1f2328; background:#fff; max-width: 1080px; margin:0 auto; padding: 34px 30px 50px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color:#64748b; font-size: 12.5px; margin-bottom: 22px; }
+  h2 { font-size: 16px; margin: 26px 0 10px; padding-left: 9px; border-left: 4px solid #2563eb; }
+
+  table { border-collapse: collapse; width:100%; font-size: 13px; }
+  th { background:#f1f5f9; text-align:left; font-weight:600; }
+  th, td { border:1px solid #dde3ea; padding: 6px 9px; vertical-align: top; }
+  tbody tr:nth-child(even) { background:#fafbfc; }
+  td.grp { font-weight:600; color:#2563eb; background:#f8faff; white-space:nowrap; }
+  td.metric { color:#0f766e; white-space:nowrap; }
+
+  /* ── 架构图 ── */
+  .arch { display:grid; grid-template-columns: 1fr 118px 1fr; gap: 0; align-items: stretch; margin-top: 8px; }
+  .panel { border-radius: 10px; padding: 12px 14px; }
+  .dev { border: 2px solid #2563eb; background: #f8faff; }
+  .pc  { border: 2px solid #16a34a; background: #f6fdf9; }
+  .panel-title { font-weight: 700; font-size: 13.5px; margin-bottom: 9px; }
+  .dev .panel-title { color:#1d4ed8; }
+  .pc  .panel-title { color:#15803d; }
+
+  .layer { display:grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-bottom: 7px; }
+  .box { background:#fff; border:1px solid #cbd5e1; border-radius: 7px; padding: 7px 9px; font-size: 12px; line-height:1.45; }
+  .box b { display:block; font-size: 12.5px; margin-bottom: 1px; }
+  .box span { color:#64748b; }
+  .accent-v { border-left: 3px solid #2563eb; }
+  .accent-a { border-left: 3px solid #7c3aed; }
+  .sysrow { background:#eef2ff; border:1px dashed #94a3b8; border-radius: 7px; padding: 7px 9px;
+            font-size: 12px; color:#334155; }
+  .flowrow { display:flex; align-items:center; justify-content:center; color:#94a3b8; font-size: 12px; margin: 5px 0; }
+
+  .link { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; }
+  .link .arrow { font-size: 26px; color:#64748b; line-height:1; }
+  .link .lbl { font-size: 11.5px; color:#475569; margin: 6px 0; line-height:1.5; }
+  .link .lbl b { color:#0f172a; font-size: 12px; }
+
+  .out { margin-top: 12px; border:1px solid #cbd5e1; border-radius: 8px; padding: 9px 12px;
+         background:#fffbeb; font-size: 12.5px; }
+
+  .kpis { display:grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 16px; }
+  .kpi { border:1px solid #dde3ea; border-radius: 9px; padding: 11px 13px; background:#fbfcfe; }
+  .kpi .n { font-size: 19px; font-weight: 700; color:#1d4ed8; line-height:1.2; }
+  .kpi .t { font-size: 11.5px; color:#64748b; margin-top: 3px; }
+
+  @media print {
+    body { padding: 0; max-width:none; font-size: 11.5px; }
+    h2 { page-break-after: avoid; }
+    table, .arch, .kpis { page-break-inside: avoid; }
+    .box, .sysrow { font-size: 10.5px; }
+  }
+</style>
+</head>
+<body>
+
+<h1>八通道声源定位视频监控系统 —— 功能与架构</h1>
+<div class="sub">版本：固件 fw-20261028-fix ｜ 上位机 v1.0.31 ｜ 2026-11-01</div>
+
+<!-- ══════════ 功能一张表 ══════════ -->
+<h2>一、功能一览</h2>
+<table>
+  <thead>
+    <tr><th style="width:62px">分组</th><th style="width:150px">功能</th><th>实现方式</th><th style="width:190px">实测指标</th></tr>
+  </thead>
+  <tbody>
+    <tr><td class="grp" rowspan="7">设备端</td><td>视频采集编码</td><td>GC2053 传感器 + SoC 硬件 H.264 编码</td><td class="metric">1920×1080@30fps，10.4 Mbps</td></tr>
+    <tr><td>8 路音频采集</td><td>8 颗 MEMS PDM 麦克风 → TLV320ADC5140 → I2S</td><td class="metric">48 kHz / 16 bit，8 路独立</td></tr>
+    <tr><td>视频推流</td><td>RTSP 服务，端口 554</td><td class="metric">单客户端</td></tr>
+    <tr><td>音频推流</td><td>自研 RTSP 服务，端口 8554</td><td class="metric">最多 4 客户端</td></tr>
+    <tr><td>即插即用</td><td>MAC 固化 + 地址派生 + 内置 DHCP 服务器</td><td class="metric">插网线自动分配地址</td></tr>
+    <tr><td>自愈机制</td><td>DHCP 看门狗 / overlay 清理 / 服务守护</td><td class="metric">故障 30 秒内自恢复</td></tr>
+    <tr><td>运行日志</td><td>自研 tvlogd 采集设备 / 内核 / 视频日志</td><td class="metric">30 秒采样，5 分钟滚动</td></tr>
+
+    <tr><td class="grp" rowspan="8">PC 端</td><td>多设备管理</td><td>自动发现 + 别名 + 各自独立录制</td><td class="metric">支持多台同时连接</td></tr>
+    <tr><td>实时监看</td><td>硬件解码 + 自适应布局</td><td class="metric">端到端延迟 10~40 ms</td></tr>
+    <tr><td>8 路音频分析</td><td>独立电平表 / 8 通道波形 / 瀑布图</td><td class="metric">8 路并行显示</td></tr>
+    <tr><td>声源定位</td><td>SRP-PHAT 多通道相位差估计</td><td class="metric">方位角 + 置信度 + 轨迹</td></tr>
+    <tr><td>通道校准</td><td>自动识别麦克风实际通道顺序</td><td class="metric">一键完成</td></tr>
+    <tr><td>音视频录制</td><td>硬件 H.265 编码 + FLAC 无损音频，1 小时分段</td><td class="metric">2.8 ~ 3.3 GB/小时</td></tr>
+    <tr><td>文件管理</td><td>别名目录 + 时间戳文件名</td><td class="metric">别名/20261028_181817_000.mp4</td></tr>
+    <tr><td>安全保护</td><td>空间预检 / 空间不足自动停录 / 单实例 / 崩溃自愈</td><td class="metric">低于 2 GB 自动停止</td></tr>
+  </tbody>
+</table>
+
+<!-- ══════════ 架构一张图 ══════════ -->
+<h2>二、系统架构</h2>
+<div class="arch">
+
+  <!-- 设备端 -->
+  <div class="panel dev">
+    <div class="panel-title">设备端 · Allwinner V851se / Tina Linux 4.9</div>
+
+    <div class="layer">
+      <div class="box accent-v"><b>摄像头 GC2053</b><span>1920×1080 @30fps</span></div>
+      <div class="box accent-a"><b>8× MEMS 麦克风</b><span>PDM 数字输出，4 组立体声对</span></div>
+    </div>
+    <div class="flowrow">▼ 视频流　　▼ PDM（CLK 3.072 MHz + 4 数据线）</div>
+    <div class="layer">
+      <div class="box accent-v"><b>H.264 硬件编码</b><span>10.4 Mbps</span></div>
+      <div class="box accent-a"><b>TLV320ADC5140</b><span>PDM → I2S，8 声道</span></div>
+    </div>
+    <div class="flowrow">▼</div>
+    <div class="layer">
+      <div class="box accent-v"><b>tinyvision-ipc</b><span>RTSP :554（单客户端）</span></div>
+      <div class="box accent-a"><b>rtsp-av（自研）</b><span>RTSP :8554（≤4 客户端）</span></div>
+    </div>
+    <div class="sysrow">
+      系统服务：S50 固定 MAC / 派生地址　·　S51 内置 DHCP 服务器　·　S97 tvlogd 日志　·　S02 overlay 自愈
+    </div>
+  </div>
+
+  <!-- 传输 -->
+  <div class="link">
+    <div class="lbl"><b>以太网 100M</b><br>RTSP / RTP-UDP<br>≈ 12 Mbps</div>
+    <div class="arrow">⇄</div>
+    <div class="lbl">控制：<br>SETUP / PLAY<br>SET_PARAMETER（校时）</div>
+  </div>
+
+  <!-- PC 端 -->
+  <div class="panel pc">
+    <div class="panel-title">PC 端 · Ubuntu / Python 3 + GTK3</div>
+    <div class="layer" style="grid-template-columns:1fr">
+      <div class="box accent-v"><b>视频解码与显示</b><span>硬件解码，延迟 10~40 ms</span></div>
+    </div>
+    <div class="layer" style="grid-template-columns:1fr">
+      <div class="box accent-a"><b>8 路音频分析</b><span>电平表 / 波形 / 瀑布图</span></div>
+    </div>
+    <div class="layer" style="grid-template-columns:1fr">
+      <div class="box accent-a"><b>声源定位 SRP-PHAT</b><span>方位角 + 置信度 + 轨迹罗盘</span></div>
+    </div>
+    <div class="layer" style="grid-template-columns:1fr">
+      <div class="box"><b>录制</b><span>硬件 H.265 + FLAC 无损，1 小时分段</span></div>
+    </div>
+    <div class="layer" style="grid-template-columns:1fr">
+      <div class="box"><b>设备管理与保护</b><span>别名 / 多设备 / 空间预检 / 单实例</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="out">
+  <b>输出</b>：录像存档 → <code>recordings/&lt;设备别名&gt;/&lt;开始时间&gt;/&lt;开始时间&gt;_000.mp4 + .flac</code>
+  　｜　单台 2.8~3.3 GB/小时，8 小时约 23~26 GB
+</div>
+
+<!-- ══════════ 关键指标 ══════════ -->
+<h2>三、关键指标</h2>
+<div class="kpis">
+  <div class="kpi"><div class="n">16 h 03 m</div><div class="t">单路连续录制无中断<br>（15 段 × 3600 秒，45 GB）</div></div>
+  <div class="kpi"><div class="n">0.9 dB</div><div class="t">8 路麦克风电平最大偏差<br>（一致性直接决定定位精度）</div></div>
+  <div class="kpi"><div class="n">≈ 8 %</div><div class="t">PC 端 CPU 占用<br>（硬件 H.265 编码，12 核机器）</div></div>
+  <div class="kpi"><div class="n">6.6 MB</div><div class="t">设备端可用内存<br>（总量 51 MB）</div></div>
+</div>
+
+</body>
+</html>

@@ -122,6 +122,13 @@ class App:
 
 
 
+        self.btn_ir = Gtk.Button(label="夜视：白天")
+        self.btn_ir.set_tooltip_text(
+            "红外夜视：点击切换 白天 → 夜晚 → 自动\n"
+            "自动模式按画面亮度判断（亮度低于阈值切夜晚）")
+        self.btn_ir.connect("clicked", self.cycle_ir_mode)
+        bar.pack_start(self.btn_ir, False, False, 0)
+
         self.btn_alias = Gtk.Button(label="别名")
         self.btn_alias.set_tooltip_text("给当前设备设置一个可读别名（显示与录制目录都用它）")
         self.btn_alias.connect("clicked", self.edit_alias)
@@ -377,6 +384,9 @@ class App:
         # 而读取器和录制仍在正常跑 —— 现场表现为"长时间录制后画面冻结，
         # 停止录制才恢复"，极难排查。切设备时已用 host 过滤，足够。
         d["newest_frame"] = (time.perf_counter(), pb)
+        # 自动夜视：按画面亮度判断（仅自动模式，1 秒最多一次）
+        if h == self.host:
+            self._ir_auto_check(pb)
         self._frame_count = getattr(self, "_frame_count", 0) + 1
         if d.get("status") != "已连接":
             d["status"] = "已连接"
@@ -747,6 +757,97 @@ class App:
             self._kill_dev_rec(dev)
         dev["rec_active"] = False
         dev["rec_start"] = None
+
+    # ───────────────────────── 红外夜视 ─────────────────────────
+    IR_MODES = ("day", "night", "auto")
+
+    def _ir_url(self, host=None):
+        return f"rtsp://{host or self.host}:8554/live"
+
+    def _send_ir(self, cmd, host=None):
+        """把红外命令发给设备（走 RTSP SET_PARAMETER，和推流同一个服务）"""
+        try:
+            from .readers import AudioReader
+            ok = AudioReader.send_rtsp_param(self._ir_url(host), f"TV-IR: {cmd}")
+            flog.log(f"红外命令 {cmd} → {host or self.host}  {'成功' if ok else '失败'}")
+            return ok
+        except Exception as e:
+            flog.log(f"红外命令异常: {e}")
+            return False
+
+    def set_ir_mode(self, mode, apply_now=True):
+        """设置夜视模式：day / night / auto"""
+        if mode not in self.IR_MODES:
+            mode = "day"
+        self.ir_mode = mode
+        self._ir_dark_cnt = 0
+        self._ir_bright_cnt = 0
+        if apply_now:
+            if mode == "night":
+                self._send_ir("night")
+            elif mode == "day":
+                self._send_ir("day")
+        labels = {"day": "白天", "night": "夜晚", "auto": "自动"}
+        try:
+            self.btn_ir.set_label(f"夜视：{labels[mode]}")
+            self.btn_ir.set_tooltip_text(
+                f"当前：{labels[mode]}（点按切换 白天→夜晚→自动）")
+        except Exception:
+            pass
+        if apply_now:
+            self.log_line(f"{time.strftime('%H:%M:%S')}  -- 红外夜视：{labels[mode]}")
+
+    def cycle_ir_mode(self, *_):
+        cur = getattr(self, "ir_mode", "day")
+        nxt = self.IR_MODES[(self.IR_MODES.index(cur) + 1) % len(self.IR_MODES)]
+        self.set_ir_mode(nxt)
+
+    def _frame_luma(self, pb):
+        """一帧的平均亮度（0~255）。按质数步长采样，几乎不花时间。"""
+        try:
+            data = pb.get_pixels()
+            n = len(data)
+            if n < 1024:
+                return 0.0
+            step = 97 * 3            # 质数步长，避开整行对齐
+            tot = 0
+            cnt = 0
+            for i in range(0, n - 3, step):
+                tot += data[i] + data[i + 1] + data[i + 2]
+                cnt += 3
+            return (tot / cnt) if cnt else 0.0
+        except Exception:
+            return 0.0
+
+    def _ir_auto_check(self, pb):
+        """自动模式：连续偏暗切夜晚，连续偏亮切白天（带迟滞）"""
+        if getattr(self, "ir_mode", "day") != "auto":
+            return
+        now = time.time()
+        if now - getattr(self, "_ir_luma_t", 0) < 1.0:
+            return
+        self._ir_luma_t = now
+        luma = self._frame_luma(pb)
+        self._ir_luma = luma
+        if luma < 42:                      # 偏暗
+            self._ir_dark_cnt += 1
+            self._ir_bright_cnt = 0
+        elif luma > 78:                    # 偏亮
+            self._ir_bright_cnt += 1
+            self._ir_dark_cnt = 0
+        else:
+            self._ir_dark_cnt = max(0, self._ir_dark_cnt - 1)
+            self._ir_bright_cnt = max(0, self._ir_bright_cnt - 1)
+
+        applied = getattr(self, "_ir_applied", "day")
+        if self._ir_dark_cnt >= 3 and applied != "night":
+            self._send_ir("night")
+            self._ir_applied = "night"
+            self.log_line(f"{time.strftime('%H:%M:%S')}  -- 亮度 {luma:.0f}，自动切夜晚")
+        elif self._ir_bright_cnt >= 6 and applied != "day":
+            self._send_ir("day")
+            self._ir_applied = "day"
+            self.log_line(f"{time.strftime('%H:%M:%S')}  -- 亮度 {luma:.0f}，自动切白天")
 
     def _mem_report(self):
         """内存诊断串：App 自身 RSS + cgroup 的 anon/file/swap。
@@ -1348,6 +1449,10 @@ class App:
                              rec=dict(_rec_opts, dir=d))
             dev["areader"] = ar
             ar.start()
+            # 让设备端红外状态和界面一致（重连后设备可能已被别的客户端改过）
+            m = getattr(self, "ir_mode", "day")
+            if m != "auto":
+                self._send_ir(m, host=dev["host"])
 
             dev["rec_dir"] = d
             dev["rec_active"] = True

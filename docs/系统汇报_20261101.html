@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>八通道声源定位视频监控系统 — 阶段性汇报</title>
+<style>
+* { box-sizing: border-box; }
+body { font: 15px/1.75 -apple-system, "Segoe UI", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+       color:#1f2328; background:#fff; max-width: 960px; margin: 0 auto; padding: 48px 36px 80px; }
+h1 { font-size: 27px; margin: 0 0 6px; padding-bottom: 14px; border-bottom: 3px solid #2563eb; }
+h2 { font-size: 20px; margin: 38px 0 14px; padding-left: 11px; border-left: 4px solid #2563eb; }
+h3 { font-size: 16px; margin: 24px 0 10px; color:#0f172a; }
+p { margin: 10px 0; }
+strong { color:#0b1220; }
+em { color:#64748b; font-style: normal; font-size: 13px; }
+code { background:#f1f5f9; padding: 1.5px 5px; border-radius: 4px; font-size: 13px;
+       font-family: ui-monospace, Consolas, monospace; color:#0b4a8b; }
+pre { background:#0f172a; color:#e2e8f0; padding:14px 16px; border-radius:8px; overflow-x:auto;
+      font-size:13px; line-height:1.6; }
+pre code { background:none; color:inherit; padding:0; }
+table { border-collapse: collapse; width:100%; margin: 14px 0 18px; font-size: 14px; }
+th { background:#f6f8fb; text-align:left; font-weight:600; }
+th, td { border:1px solid #dde3ea; padding: 8px 11px; vertical-align: top; }
+tbody tr:nth-child(even) { background:#fafbfc; }
+ul, ol { margin: 8px 0 12px; padding-left: 24px; }
+li { margin: 4px 0; }
+hr { border:none; border-top:1px solid #e5e9ef; margin: 30px 0; }
+figure { margin: 22px 0; text-align: center; }
+figure img { max-width: 100%; border:1px solid #dde3ea; border-radius: 8px; }
+figcaption { font-size: 12.5px; color:#64748b; margin-top: 8px; }
+@media print {
+  body { padding: 0; max-width:none; font-size: 12px; }
+  h2 { page-break-after: avoid; }
+  table, pre, figure { page-break-inside: avoid; }
+}
+</style></head><body>
+<h1>八通道声源定位视频监控系统 —— 阶段性汇报</h1>
+<p><strong>日期</strong>：2026-11-01　　<strong>版本</strong>：固件 <code>fw-20261028-fix</code> / 上位机 <code>v1.0.31</code></p>
+<hr>
+<h2>一、项目概述</h2>
+<p>自研边缘采集设备（Allwinner V851se + 8 麦克风 PDM 阵列）通过以太网直连 PC，</p>
+<p>PC 端应用负责实时监看、声源定位与录像存档。</p>
+<p><strong>核心目标与达成情况：</strong></p>
+<table><thead><tr><th>目标</th><th>状态</th></tr></thead><tbody><tr><td>即插即用（插网线自动分配地址）</td><td>✅ 已实现（设备内置 DHCP 服务 + 看门狗自愈）</td></tr><tr><td>1080p30 实时视频</td><td>✅ 已实现</td></tr><tr><td>8 路独立音频（供声源定位）</td><td>✅ 已实现，8 路全部独立传输</td></tr><tr><td>长时间稳定录制</td><td>✅ 单路连续 16 小时 03 分无中断</td></tr><tr><td>录像体积可控</td><td>✅ 从 6.1 GB/小时降到 2.8 GB/小时（省 54%）</td></tr></tbody></table>
+<h3>界面一览（实测）</h3>
+<figure><img src="screenshot_20261101.png" alt="上位机界面"><figcaption>上位机界面</figcaption></figure>
+<p>*界面分区：左上视频（1080p30 硬解显示）、右上 8 路电平表 / 瀑布图 / 事件记录 / 方位、</p>
+<p>下方设备列表 / 8 通道波形 / 方位罗盘。底部状态栏显示分辨率和端到端延迟（图中 14 ms）。*</p>
+<hr>
+<h2>二、系统架构</h2>
+<h3>2.1 硬件组成</h3>
+<table><thead><tr><th>部件</th><th>型号 / 规格</th><th>说明</th></tr></thead><tbody><tr><td>主控 SoC</td><td>Allwinner V851se</td><td>Cortex-A7 + RISC-V 协处理器，内置视频编码器</td></tr><tr><td>内存</td><td>51 MB（MemTotal 51228 kB）</td><td>资源受限，是主要设计约束</td></tr><tr><td>存储</td><td>SD 卡，squashfs 根文件系统 + overlayfs</td><td>固件只读，运行数据写 UDISK 分区</td></tr><tr><td>网络</td><td>100M 以太网</td><td>视频 + 音频共用，实测占用约 12 Mbps</td></tr><tr><td>摄像头</td><td>GC2053，1080p30</td><td>硬件 H.264 编码，约 10.5 Mbps</td></tr><tr><td>麦克风阵列</td><td>8 × MEMS PDM（MSM261DDB019）</td><td>4 组立体声对，共用时钟与 4 条数据线</td></tr><tr><td>音频 ADC</td><td>TLV320ADC5140</td><td>PDM → I2S，8 通道</td></tr><tr><td>阵列接口</td><td>16 针 0.5mm FPC 排线</td><td>时钟 3.072 MHz、4 路数据、3.3V 供电</td></tr></tbody></table>
+<h3>2.2 设备端软件（固件）</h3>
+<p>基于官方 V853 SDK 移植，Tina Linux 4.9.191，musl。</p>
+<table><thead><tr><th>服务</th><th>职责</th></tr></thead><tbody><tr><td><code>tinyvision-ipc</code></td><td>视频采集 + H.264 硬编 + RTSP（端口 554）</td></tr><tr><td><code>rtsp-av</code>（自研）</td><td>8 路音频采集 + RTSP（端口 8554），支持多客户端</td></tr><tr><td><code>S50eth0static</code></td><td>MAC 固化与地址派生（重启不变）</td></tr><tr><td><code>S51eth0dhcp</code></td><td>内置 DHCP 服务器，电脑插上即自动获得地址</td></tr><tr><td><code>S97tvlogd</code>（自研）</td><td>日志采集（设备/内核/视频），30 秒采样、5 分钟滚动</td></tr><tr><td><code>S02overlay-clean</code>（自研）</td><td>overlay 自愈：自动清理遮蔽新固件的旧脚本</td></tr></tbody></table>
+<h3>2.3 PC 端应用</h3>
+<p>Python 3 + GTK3，单文件部署（.deb），支持多设备管理。</p>
+<table><thead><tr><th>模块</th><th>功能</th></tr></thead><tbody><tr><td>视频</td><td>解码显示、多设备切换、断线自动重连</td></tr><tr><td>音频</td><td>8 路独立电平表、8 通道波形、瀑布图</td></tr><tr><td>声源定位</td><td>SRP-PHAT 算法，实时方位角 + 置信度 + 轨迹罗盘</td></tr><tr><td>音频校准</td><td>8 通道自动顺序校准（解决接线顺序不一致）</td></tr><tr><td>录制</td><td>硬件 H.265 + FLAC 无损，1 小时分段，文件名带时间戳</td></tr><tr><td>设备管理</td><td>别名、多设备独立录制、录制时长显示</td></tr><tr><td>安全保护</td><td>磁盘空间预检 + 自动停录、单实例、崩溃自愈</td></tr></tbody></table>
+<hr>
+<h2>三、关键指标实测数据</h2>
+<h3>3.1 视频</h3>
+<table><thead><tr><th>指标</th><th>实测值</th></tr></thead><tbody><tr><td>分辨率 / 帧率</td><td>1920×1080 / 30 fps</td></tr><tr><td>编码格式</td><td>H.264 High@5.1（设备端）</td></tr><tr><td>输出码率</td><td>10.44 Mbps</td></tr><tr><td>显示延迟</td><td>10~40 ms（采集到显示）</td></tr></tbody></table>
+<h3>3.2 音频</h3>
+<table><thead><tr><th>指标</th><th>实测值</th></tr></thead><tbody><tr><td>通道数</td><td>8 路独立（非混音）</td></tr><tr><td>采样率 / 位深</td><td>48 kHz / 16 bit</td></tr><tr><td>单路电平一致性</td><td>最大偏差 <strong>0.9 dB</strong>（-34.2 ~ -33.3 dB）</td></tr><tr><td>声道顺序</td><td>校准后 1→2→3→4→5→6→7→8 顺序正确</td></tr><tr><td>编码（录像）</td><td>FLAC 无损，8 声道</td></tr></tbody></table>
+<h3>3.3 资源占用</h3>
+<table><thead><tr><th>项目</th><th>数值</th></tr></thead><tbody><tr><td>设备端可用内存</td><td>6.6 MB / 51 MB（新固件预计 7.2 MB）</td></tr><tr><td>设备端温度</td><td>59.3 °C</td></tr><tr><td>设备端内核告警</td><td>0 条（连续运行 12 分钟采样）</td></tr><tr><td>PC 端 CPU（单路录制）</td><td>0.68 ~ 1.03 核（12 核机器 ≈ 8%）</td></tr><tr><td>PC 端内存（录制中）</td><td>约 110 MB</td></tr></tbody></table>
+<h3>3.4 录像体积对比（单台设备）</h3>
+<table><thead><tr><th>录制模式</th><th>体积/小时</th><th>8 小时</th><th>说明</th></tr></thead><tbody><tr><td>无损复制 + FLAC（改造前）</td><td>6.1 GB</td><td>49 GB</td><td>与设备输出逐比特一致</td></tr><tr><td><strong>硬件 H.265 4Mbps + FLAC（当前）</strong></td><td><strong>2.8 ~ 3.3 GB</strong></td><td><strong>23 ~ 26 GB</strong></td><td>画质 SSIM 0.981</td></tr><tr><td>硬件 H.265 2Mbps + FLAC</td><td>2.5 GB</td><td>20 GB</td><td>更省空间</td></tr></tbody></table>
+<hr>
+<h2>四、稳定性验证</h2>
+<table><thead><tr><th>测试</th><th>时长</th><th>结果</th></tr></thead><tbody><tr><td><strong>单路连续录制</strong></td><td><strong>16 小时 03 分</strong></td><td>✅ 15 个分段（每段精确 3600.0 秒），共 45 GB，无中断</td></tr><tr><td>双路同时录制</td><td>8 小时 45 分</td><td>✅ 两路各 26 GB，由磁盘保护正常停止</td></tr><tr><td>断线重连</td><td>多轮</td><td>✅ 退避重连，不刷屏、不崩溃</td></tr><tr><td>长时间运行</td><td>6.5 小时</td><td>✅ 曾被系统 OOM 连带杀死，已通过独立 cgroup 解决</td></tr></tbody></table>
+<p><strong>长时间录制输出示例</strong>（16 小时测试）：</p>
+<pre>20261028_181817_000.mp4   hevc  1920x1080  4.0 Mbps  3600.0 s
+20261028_181817_000.flac  flac  48000 Hz   8 声道
+...
+共 30 个文件（15 段视频 + 15 段音频），45 GB</pre>
+<hr>
+<h2>五、已解决的关键技术问题</h2>
+<table><thead><tr><th>#</th><th>问题现象</th><th>根因</th><th>解决方案</th></tr></thead><tbody><tr><td>1</td><td>设备运行数小时后死机、重启失效</td><td>内存被旧固件脚本耗尽（35 MB → 1 MB）</td><td>overlay 自愈机制 + 精简常驻进程，可用内存 4 → 6.6 MB</td></tr><tr><td>2</td><td>录制一段时间后界面卡死、关不掉</td><td>ffmpeg 内存以 20 MB/分钟线性泄漏</td><td>拆分为&quot;视频进程 + 音频进程&quot;，两路均 0 增长</td></tr><tr><td>3</td><td>最后一段录像无法播放</td><td>强杀进程导致 mp4 索引未写入</td><td>改为优雅停止（SIGINT + 读完管道）</td></tr><tr><td>4</td><td>磁盘满后&quot;只有声音没有画面&quot;</td><td>仅视频进程失败退出</td><td>空间不足时音视频一起停 + 开始前预检</td></tr><tr><td>5</td><td>音频重连日志刷屏，无法分辨设备</td><td>退避计数被提前清零</td><td>收到首块数据才算连上，消息带设备地址</td></tr><tr><td>6</td><td>PC 端应用被系统 OOM 连带杀死</td><td>与终端共享 cgroup，页缓存涨到 13 GB</td><td>改为独立 systemd 服务 + 2 GB cgroup 上限</td></tr><tr><td>7</td><td>录像体积过大（6.1 GB/小时）</td><td>设备端固定 10.5 Mbps</td><td>启用 Intel 硬件 H.265 编码，降至 2.8 GB/小时</td></tr><tr><td>8</td><td>设备日志时间戳无意义（1970 年）</td><td>板子无 RTC、无外网</td><td>RTSP <code>SET_PARAMETER</code> 通道由 PC 下发时间</td></tr><tr><td>9</td><td>排线发热</td><td>FPC 排线插反，3.3V 对地短路</td><td>定位并纠正（详见硬件问题跟踪）</td></tr></tbody></table>
+<hr>
+<h2>六、当前限制</h2>
+<table><thead><tr><th>限制</th><th>影响</th><th>现状</th></tr></thead><tbody><tr><td>设备端视频程序为预编译，无源码</td><td>编码格式/码率固定为 H.264 10.5 Mbps</td><td>PC 端转码规避（有 1 次重编码损失，SSIM 0.981）</td></tr><tr><td>视频 RTSP 仅支持单客户端</td><td>显示 + 录制不能同时开两路</td><td>已用&quot;复用显示流&quot;规避，全程只占 1 路客户端</td></tr><tr><td>设备无 RTC</td><td>日志时间不可信</td><td>已用 PC 校时解决</td></tr><tr><td>麦克风供电电压待确认</td><td>器件标称 1.8V，板上为 3.3V</td><td>待查数据手册确认，长期可靠性风险</td></tr><tr><td>无录像自动清理</td><td>录满后需人工清理</td><td>已有空间保护自动停录，尚无环形覆盖</td></tr></tbody></table>
+<hr>
+<h2>七、后续计划</h2>
+<table><thead><tr><th>优先级</th><th>事项</th><th>说明</th></tr></thead><tbody><tr><td>高</td><td>录像容量上限 + 自动清理旧录像</td><td>实现 7×24 连续录制，无需人工干预</td></tr><tr><td>高</td><td>麦克风供电电压确认与整改</td><td>硬件可靠性，影响长期一致性</td></tr><tr><td>中</td><td>自研设备端视频推流（H.265 直出）</td><td>可免去 PC 重编码，带宽减半，需重写视频管线</td></tr><tr><td>中</td><td>声源定位精度标定</td><td>当前提供方位角 + 置信度，缺定量精度指标</td></tr><tr><td>低</td><td>设备别名按 MAC 绑定</td><td>换 IP 后别名不丢失</td></tr></tbody></table>
+<hr>
+<h2>八、交付物</h2>
+<table><thead><tr><th>交付物</th><th>地址</th></tr></thead><tbody><tr><td>上位机源码与安装包</td><td><code>github.com/Xpg74138/va-capture</code>（公开发布，提供 .deb）</td></tr><tr><td>固件源码补丁与镜像</td><td><code>github.com/Xpg74138/tinyvision-sdk-tracker</code>（私有，含 33 个补丁）</td></tr><tr><td>固件版本</td><td><code>fw-20261028-fix</code></td></tr><tr><td>上位机版本</td><td><code>v1.0.31</code></td></tr></tbody></table>
+<p><strong>上位机安装方式</strong>：<code>sudo apt install ./va-capture_1.0.31_all.deb</code>，装完从应用菜单打开即可。</p>
+</body></html>

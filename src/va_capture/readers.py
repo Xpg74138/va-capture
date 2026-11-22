@@ -439,6 +439,27 @@ class AudioReader(threading.Thread):
                     f"{self.label} 音频断开，{delay} 秒后重连… (第 {self._retry} 次)")
             time.sleep(delay)
 
+    @staticmethod
+    def send_rtsp_param(url, header, timeout=2.0):
+        """向设备发一条 SET_PARAMETER（自带 CSeq），失败静默。
+
+        设备端 rtsp-av 在 SET_PARAMETER 里识别：
+          TV-TIME: <unix>      → 校时
+          TV-IR:   day|night|led_on|led_off  → 红外夜视
+        """
+        try:
+            import socket
+            host = url.split("//")[-1].split(":")[0]
+            port = int(url.split(":")[-1].split("/")[0])
+            msg = (f"SET_PARAMETER rtsp://{host}:{port}/live RTSP/1.0\r\n"
+                   f"CSeq: 2\r\n{header}\r\n\r\n").encode()
+            with socket.create_connection((host, port), timeout=timeout) as sk:
+                sk.sendall(msg)
+                sk.recv(256)
+            return True
+        except Exception:
+            return False
+
     def _sync_device_time(self):
         """把电脑的时间推给板子（板子没有 RTC，开机永远是 1970）
 
