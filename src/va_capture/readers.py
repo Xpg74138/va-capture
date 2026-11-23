@@ -175,6 +175,7 @@ class VideoReader(threading.Thread):
         这里改为发 SIGINT（ffmpeg 的优雅退出信号），并让读取线程继续
         把 stdout 读干，ffmpeg 才能正常收尾。
         """
+        self._intentional_stop = True     # 主动停止（切录制/切设备），不是断线
         self._stop.set()
         if self.proc and self.proc.poll() is None:
             try:
@@ -309,29 +310,34 @@ class VideoReader(threading.Thread):
             except Exception:
                 pass
             vcodec = (self.rec.get("vcodec") or "copy").strip()
+            # 关键：解码输出的帧在哪一侧？
+            #   hwmode == "vaapi"    → -hwaccel_output_format vaapi，帧在 GPU 里，
+            #                          **不能**用 format=nv12（那是 CPU 帧的写法），
+            #                          要 hwdownload 或直接用 *_vaapi 编码器
+            #   hwmode == "vaapi_sw" → 帧已下载到内存，用 format=nv12,hwupload
+            hw_frames = (getattr(self, "hwmode", "") == "vaapi")
+
             if vcodec == "copy":
                 venc = ["-c:v", "copy"]
             elif vcodec.startswith("hw265_"):
-                # 硬件 H.265：解码/编码都在 GPU，实测整条链路 CPU 约 4%
-                # （软件 x265 是 230%）。需装 intel-media-va-driver-non-free。
                 br = vcodec.split("_", 1)[1]
-                venc = ["-vf", "format=nv12,hwupload",
-                        "-c:v", "hevc_vaapi", "-b:v", br,
-                        "-maxrate", br, "-bufsize", "8M"]
+                venc = (["-vf", "scale_vaapi=format=nv12"] if hw_frames
+                        else ["-vf", "format=nv12,hwupload"])
+                venc += ["-c:v", "hevc_vaapi", "-b:v", br,
+                         "-maxrate", br, "-bufsize", "8M"]
             elif vcodec.startswith("x265_"):
-                # 软编 H.265：同码率画质比 H.264 好约 30~40%，
-                # ultrafast 实测 2.4x 实时（两路录制 CPU 占用约 85% 单核等效）
                 br = vcodec.split("_", 1)[1]
-                venc = ["-c:v", "libx265", "-preset", "ultrafast",
-                        "-x265-params", "log-level=error",
-                        "-b:v", br, "-maxrate", br,
-                        "-bufsize", "8M", "-pix_fmt", "yuv420p"]
+                venc = (["-vf", "hwdownload,format=nv12"] if hw_frames else [])
+                venc += ["-c:v", "libx265", "-preset", "ultrafast",
+                         "-x265-params", "log-level=error",
+                         "-b:v", br, "-maxrate", br,
+                         "-bufsize", "8M", "-pix_fmt", "yuv420p"]
             else:
-                # 软编 H.264：x264 ultrafast 实测 8.6x 实时，CPU 占用很低
                 br = vcodec.split("_", 1)[1] if "_" in vcodec else vcodec
-                venc = ["-c:v", "libx264", "-preset", "ultrafast",
-                        "-b:v", br, "-maxrate", br,
-                        "-bufsize", "8M", "-pix_fmt", "yuv420p"]
+                venc = (["-vf", "hwdownload,format=nv12"] if hw_frames else [])
+                venc += ["-c:v", "libx264", "-preset", "ultrafast",
+                         "-b:v", br, "-maxrate", br,
+                         "-bufsize", "8M", "-pix_fmt", "yuv420p"]
             rec_out = ["-map", "0:v"] + venc + [
                        "-f", "segment", "-segment_time", str(seg),
                        "-reset_timestamps", "1",
@@ -343,8 +349,24 @@ class VideoReader(threading.Thread):
             cmd = cmd[:ri] + rec_out + cmd[ri:]
 
         try:
+            # 排错开关：设置 VA_CAPTURE_FFMPEG_LOG 就把 ffmpeg 的错误输出
+            # 追加到该文件（默认丢弃，避免刷屏）
+            _errlog = os.environ.get("VA_CAPTURE_FFMPEG_LOG")
+            if _errlog:
+                try:
+                    _errfh = open(_errlog, "ab")
+                except Exception:
+                    _errfh = subprocess.DEVNULL
+            else:
+                _errfh = subprocess.DEVNULL
+            if _errlog:
+                try:
+                    with open(_errlog, "a") as _f:
+                        _f.write("\n=== CMD ===\n" + " ".join(cmd) + "\n")
+                except Exception:
+                    pass
             self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                         stderr=subprocess.DEVNULL,
+                                         stderr=_errfh,
                                          bufsize=w * h * 3)
             try:
                 fcntl.fcntl(self.proc.stdout.fileno(), 1031, 1024 * 1024)
@@ -395,7 +417,10 @@ class VideoReader(threading.Thread):
                 self.proc.kill()
             except Exception:
                 pass
-        GLib.idle_add(self.on_status, f"{self.label} 视频已断开")
+        if not getattr(self, "_intentional_stop", False):
+            # 主动停止（切录制模式/切设备）不报"断开"，否则界面上会
+            # 出现"视频流断开"但画面其实一直在正常显示，很误导
+            GLib.idle_add(self.on_status, f"{self.label} 视频已断开")
 
 
 class AudioReader(threading.Thread):
@@ -413,6 +438,7 @@ class AudioReader(threading.Thread):
         self.proc = None
 
     def stop(self):
+        self._intentional_stop = True     # 主动停止，不是断线
         self._stop.set()
         if self.proc and self.proc.poll() is None:
             try:
@@ -565,7 +591,8 @@ class AudioReader(threading.Thread):
         except Exception:
             pass
         if not _first:
-            GLib.idle_add(self.on_status, f"{self.label} 音频已断开")
+            if not getattr(self, "_intentional_stop", False):
+                GLib.idle_add(self.on_status, f"{self.label} 音频已断开")
 
 
 # --------------------------------------------------------------------------
