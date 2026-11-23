@@ -130,6 +130,9 @@ class App:
         self._ir_probe_t = 0.0
         self._ir_luma = 0.0
         self._ir_dark_cnt = 0
+        self._ir_bright_cnt = 0
+        self._ir_night_t = 0.0
+        self._ir_night_luma = 0.0
 
         self.btn_ir = Gtk.Button(label="夜视：白天")
         self.btn_ir.set_tooltip_text(
@@ -869,6 +872,8 @@ class App:
         else:
             self._send_ir("led_on")
             self._ir_applied = "night"
+            self._ir_night_t = time.time()      # 重新学习基准亮度
+            self._ir_night_luma = 0
             self.log_line(f"{time.strftime('%H:%M:%S')}  -- 环境亮度 {luma:.0f}，"
                           f"维持夜晚")
         return False
@@ -891,8 +896,34 @@ class App:
         applied = getattr(self, "_ir_applied", None)
 
         if applied == "night":
-            # 夜晚状态：不按当前亮度判断（灯本身把画面照亮了），
-            # 改为周期性关灯探测环境亮度
+            # 记录"纯红外照明下的基准亮度"（进夜晚 3 秒后取一次）
+            if getattr(self, "_ir_night_luma", 0) <= 0:
+                if now - getattr(self, "_ir_night_t", now) > 3:
+                    self._ir_night_luma = luma
+
+            d = self.devices.get(self.host) or {}
+            recording = bool(d.get("rec_active"))
+
+            if recording:
+                # ⚠️ 录制期间绝对不关灯探测：关灯 1.2 秒会在录像里留下黑闪。
+                # 改用"比纯红外照明明显更亮"的启发式：房间开灯后画面亮度
+                # 会明显高于红外灯单独照明的基准值；持续 60 秒才切回白天
+                # （一次性动作，录像里最多有一次正常切换，不会周期性闪）。
+                self._ir_probe_t = now          # 探测计时往后推
+                base = getattr(self, "_ir_night_luma", 0) or luma
+                if base > 0 and luma > base * 1.35:
+                    self._ir_bright_cnt = getattr(self, "_ir_bright_cnt", 0) + 1
+                else:
+                    self._ir_bright_cnt = 0
+                if getattr(self, "_ir_bright_cnt", 0) >= 60:
+                    self._send_ir("day")
+                    self._ir_applied = "day"
+                    self._ir_bright_cnt = 0
+                    self.log_line(f"{time.strftime('%H:%M:%S')}  -- 录制中亮度升至 {luma:.0f}"
+                                  f"（基准 {base:.0f}），自动切回白天")
+                return
+
+            # 未录制：正常关灯探测（每 15 秒一次）
             if (now - getattr(self, "_ir_probe_t", 0) >= 15
                     and not getattr(self, "_ir_probing", False)):
                 self._ir_ambient_probe()
@@ -907,6 +938,9 @@ class App:
             self._send_ir("night")
             self._ir_applied = "night"
             self._ir_probe_t = 0        # 进入夜晚后立刻做一次探测基准
+            self._ir_night_t = now      # 用于 3 秒后取"纯红外照明"基准亮度
+            self._ir_night_luma = 0
+            self._ir_bright_cnt = 0
             self.log_line(f"{time.strftime('%H:%M:%S')}  -- 画面亮度 {luma:.0f}，"
                           f"自动切夜晚（开红外灯 + 滤光片移出）")
 
