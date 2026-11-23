@@ -122,6 +122,15 @@ class App:
 
 
 
+        # 红外夜视状态
+        self.ir_mode = "day"          # day / night / auto
+        self._ir_applied = None       # None=未知，日/夜以设备实际状态为准
+        self._ir_probing = False
+        self._ir_luma_t = 0.0
+        self._ir_probe_t = 0.0
+        self._ir_luma = 0.0
+        self._ir_dark_cnt = 0
+
         self.btn_ir = Gtk.Button(label="夜视：白天")
         self.btn_ir.set_tooltip_text(
             "红外夜视：点击切换 白天 → 夜晚 → 自动\n"
@@ -785,8 +794,18 @@ class App:
         if apply_now:
             if mode == "night":
                 self._send_ir("night")
+                self._ir_applied = "night"
             elif mode == "day":
                 self._send_ir("day")
+                self._ir_applied = "day"
+            else:
+                # 切到自动：先关灯探一次环境亮度，决定当前该白天还是夜晚
+                # （否则如果设备本来就是夜晚，程序以为"已经是白天"，
+                #   会一直不切，这正是之前自动模式不关灯的 bug）
+                self._ir_applied = None
+                self._ir_probe_t = 0
+                self._ir_probing = False
+                GLib.timeout_add(400, self._ir_ambient_probe)
         labels = {"day": "白天", "night": "夜晚", "auto": "自动"}
         try:
             self.btn_ir.set_label(f"夜视：{labels[mode]}")
@@ -819,8 +838,48 @@ class App:
         except Exception:
             return 0.0
 
+    def _ir_ambient_probe(self):
+        """关灯 1.2 秒，量一次真正的环境亮度。
+
+        为什么需要这步：夜视时红外灯把画面照亮了，亮度计读数很高，
+        直接拿它判断"该不该切回白天"会一直觉得"很亮"，但切回白天后
+        又发现很暗 —— 于是来回跳。所以判断"是否变亮"必须把灯先关掉。
+        """
+        if getattr(self, "_ir_probing", False):
+            return
+        self._ir_probing = True
+        self._ir_probe_t = time.time()
+        self._send_ir("led_off")
+        GLib.timeout_add(1200, self._ir_finish_probe)
+        return False
+
+    def _ir_finish_probe(self):
+        """灯已关，用当前帧判断环境亮度，决定留在夜晚还是切回白天。"""
+        self._ir_probing = False
+        d = self.devices.get(self.host) or {}
+        item = d.get("newest_frame")
+        luma = self._frame_luma(item[1]) if item else getattr(self, "_ir_luma", 0.0)
+        self._ir_luma = luma
+        if luma > 75:
+            self._send_ir("day")
+            self._ir_applied = "day"
+            self._ir_dark_cnt = 0
+            self.log_line(f"{time.strftime('%H:%M:%S')}  -- 环境亮度 {luma:.0f}，"
+                          f"自动切回白天（关红外灯 + 滤光片切入）")
+        else:
+            self._send_ir("led_on")
+            self._ir_applied = "night"
+            self.log_line(f"{time.strftime('%H:%M:%S')}  -- 环境亮度 {luma:.0f}，"
+                          f"维持夜晚")
+        return False
+
     def _ir_auto_check(self, pb):
-        """自动模式：连续偏暗切夜晚，连续偏亮切白天（带迟滞）"""
+        """自动模式。
+
+        白天 → 夜晚：连续 3 秒画面偏暗（< 42）就切夜晚
+        夜晚 → 白天：每 15 秒做一次"关灯探测"，环境亮度 > 75 才切回白天，
+                     否则把灯重新打开（避免红外灯把自己照到误判为天亮）
+        """
         if getattr(self, "ir_mode", "day") != "auto":
             return
         now = time.time()
@@ -829,25 +888,27 @@ class App:
         self._ir_luma_t = now
         luma = self._frame_luma(pb)
         self._ir_luma = luma
-        if luma < 42:                      # 偏暗
-            self._ir_dark_cnt += 1
-            self._ir_bright_cnt = 0
-        elif luma > 78:                    # 偏亮
-            self._ir_bright_cnt += 1
-            self._ir_dark_cnt = 0
-        else:
-            self._ir_dark_cnt = max(0, self._ir_dark_cnt - 1)
-            self._ir_bright_cnt = max(0, self._ir_bright_cnt - 1)
+        applied = getattr(self, "_ir_applied", None)
 
-        applied = getattr(self, "_ir_applied", "day")
-        if self._ir_dark_cnt >= 3 and applied != "night":
+        if applied == "night":
+            # 夜晚状态：不按当前亮度判断（灯本身把画面照亮了），
+            # 改为周期性关灯探测环境亮度
+            if (now - getattr(self, "_ir_probe_t", 0) >= 15
+                    and not getattr(self, "_ir_probing", False)):
+                self._ir_ambient_probe()
+            return
+
+        # 白天（或状态未知）：只看是否够暗
+        if luma < 42:
+            self._ir_dark_cnt = getattr(self, "_ir_dark_cnt", 0) + 1
+        else:
+            self._ir_dark_cnt = 0
+        if getattr(self, "_ir_dark_cnt", 0) >= 3 and applied != "night":
             self._send_ir("night")
             self._ir_applied = "night"
-            self.log_line(f"{time.strftime('%H:%M:%S')}  -- 亮度 {luma:.0f}，自动切夜晚")
-        elif self._ir_bright_cnt >= 6 and applied != "day":
-            self._send_ir("day")
-            self._ir_applied = "day"
-            self.log_line(f"{time.strftime('%H:%M:%S')}  -- 亮度 {luma:.0f}，自动切白天")
+            self._ir_probe_t = 0        # 进入夜晚后立刻做一次探测基准
+            self.log_line(f"{time.strftime('%H:%M:%S')}  -- 画面亮度 {luma:.0f}，"
+                          f"自动切夜晚（开红外灯 + 滤光片移出）")
 
     def _mem_report(self):
         """内存诊断串：App 自身 RSS + cgroup 的 anon/file/swap。
@@ -1449,10 +1510,10 @@ class App:
                              rec=dict(_rec_opts, dir=d))
             dev["areader"] = ar
             ar.start()
-            # 让设备端红外状态和界面一致（重连后设备可能已被别的客户端改过）
-            m = getattr(self, "ir_mode", "day")
-            if m != "auto":
-                self._send_ir(m, host=dev["host"])
+            # 注意：这里**不**下发红外命令。
+            # 之前"连接时同步一次夜视状态"的做法，会导致每次连接都把
+            # IR-CUT 滤光片推一下；如果驱动极性不对，白天画面就发虚。
+            # 现在只在用户点按钮（或自动模式判定变化）时才动滤光片。
 
             dev["rec_dir"] = d
             dev["rec_active"] = True
