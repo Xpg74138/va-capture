@@ -907,7 +907,7 @@ class App:
             if recording:
                 # ⚠️ 录制期间绝对不关灯探测：关灯 1.2 秒会在录像里留下黑闪。
                 # 改用"比纯红外照明明显更亮"的启发式：房间开灯后画面亮度
-                # 会明显高于红外灯单独照明的基准值；持续 60 秒才切回白天
+                # 会明显高于红外灯单独照明的基准值；持续 30 秒才切回白天
                 # （一次性动作，录像里最多有一次正常切换，不会周期性闪）。
                 self._ir_probe_t = now          # 探测计时往后推
                 base = getattr(self, "_ir_night_luma", 0) or luma
@@ -915,7 +915,7 @@ class App:
                     self._ir_bright_cnt = getattr(self, "_ir_bright_cnt", 0) + 1
                 else:
                     self._ir_bright_cnt = 0
-                if getattr(self, "_ir_bright_cnt", 0) >= 60:
+                if getattr(self, "_ir_bright_cnt", 0) >= 30:
                     self._send_ir("day")
                     self._ir_applied = "day"
                     self._ir_bright_cnt = 0
