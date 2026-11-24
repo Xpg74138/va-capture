@@ -13,13 +13,24 @@ from gi.repository import GLib, GdkPixbuf, Pango, Gdk, Gtk
 from .constants import AUDIO_CH, AUDIO_RATE, AUDIO_BLOCK, AUDIO_BYTES
 
 def probe_video(url, timeout=10):
+    """探测视频流参数，返回 (宽, 高, 帧率)；帧率探测失败时给 30。"""
     cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
-           "-show_entries", "stream=width,height", "-of", "csv=p=0", url]
+           "-show_entries", "stream=width,height,r_frame_rate",
+           "-of", "csv=p=0", url]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True,
-                             timeout=timeout).stdout.strip().split(",")
+        raw = subprocess.run(cmd, capture_output=True, text=True,
+                             timeout=timeout).stdout.strip()
+        out = raw.split(",")
         if len(out) >= 2 and out[0].isdigit():
-            return int(out[0]), int(out[1])
+            fps = 30
+            if len(out) >= 3 and "/" in out[2]:
+                try:
+                    num, den = out[2].split("/")
+                    if int(den) and int(num):
+                        fps = max(1, round(int(num) / int(den)))
+                except Exception:
+                    pass
+            return int(out[0]), int(out[1]), fps
     except Exception:
         pass
     return None
@@ -230,6 +241,8 @@ class VideoReader(threading.Thread):
                 return
             info = probe_video(self.url, timeout=5)
             if info:
+                self.src_fps = info[2]
+            if info:
                 break
             # 只报第 1/5/20/60 次，避免设备挂着时日志刷屏
             if attempt + 1 in (1, 5, 20, 60):
@@ -241,7 +254,7 @@ class VideoReader(threading.Thread):
         if not info:
             GLib.idle_add(self.on_status, "视频探测失败")
             return
-        sw, sh = info
+        sw, sh = info[0], info[1]     # probe_video 返回 (w, h, fps)
         # 直接解码成显示尺寸，避免"ffmpeg 缩一次 + Python 再缩一次"的双重开销
         tw, th = self.target or (960, 540)
         tw = max(2, int(tw) & ~1)
@@ -338,7 +351,13 @@ class VideoReader(threading.Thread):
                 venc += ["-c:v", "libx264", "-preset", "ultrafast",
                          "-b:v", br, "-maxrate", br,
                          "-bufsize", "8M", "-pix_fmt", "yuv420p"]
-            rec_out = ["-map", "0:v"] + venc + [
+            # 关键：Intel VAAPI 编码器会按"场频"理解时间戳，
+            # 30fps 的流会被编成 60fps（每帧重复一次），一半码率浪费在
+            # 重复帧上 —— 表现为"文件显示 60fps、画面偏软"。
+            # 所以重编码时必须显式指定帧率；-c copy 不能加（非法）。
+            _fps_opt = ([] if vcodec == "copy"
+                        else ["-r", str(getattr(self, "src_fps", 30) or 30)])
+            rec_out = ["-map", "0:v"] + _fps_opt + venc + [
                        "-f", "segment", "-segment_time", str(seg),
                        "-reset_timestamps", "1",
                        "-segment_start_number", str(start_no),
