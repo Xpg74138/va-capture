@@ -1,5 +1,6 @@
 """主窗口与业务逻辑"""
-import os, sys, json, time, signal, subprocess, threading, collections
+import os
+import glob, sys, json, time, signal, subprocess, threading, collections
 import numpy as np
 import fcntl
 import gi
@@ -133,6 +134,7 @@ class App:
         self._ir_bright_cnt = 0
         self._ir_night_t = 0.0
         self._ir_night_luma = 0.0
+        self._seg_watch = {}          # 分段文件 -> [开始时间, 大小, 最后写入时间]
 
         self.btn_ir = Gtk.Button(label="夜视：白天")
         self.btn_ir.set_tooltip_text(
@@ -761,8 +763,100 @@ class App:
         self._sync_rec_button()
         self._update_device_list()
 
+    # ─────────────────── 录像分段重命名 ───────────────────
+    # 目标格式：<卷号>_<日期>_<开始时间>-<结束时间>.<ext>
+    #   001_20261124_104010-105010.mp4
+    # 跨天时段末也带日期：
+    #   001_20261124_235010-20261125_005010.mp4
+    #
+    # ffmpeg 的 segment muxer 只能在**创建文件时**确定名字，
+    # 那时候还不知道结束时间，所以分段写完后由这里改名。
+    # 分段的开始/结束时间用"文件从出现到不再变化"的实际时间，
+    # 精度到秒（每秒巡检一次）。
+
+    @staticmethod
+    def _seg_index(path):
+        stem = os.path.splitext(os.path.basename(path))[0]
+        tail = stem.rsplit("_", 1)
+        if len(tail) == 2 and tail[1].isdigit():
+            return int(tail[1])
+        return -1
+
+    def _watch_and_rename_segments(self, dev, final=False):
+        d = dev.get("rec_dir") or ""
+        if not d or not os.path.isdir(d):
+            return
+        w = self._seg_watch
+        now = time.time()
+        for ext in ("mp4", "flac"):
+            files = [f for f in glob.glob(os.path.join(d, "*." + ext))
+                     if self._seg_index(f) >= 0]
+            if not files:
+                continue
+            max_idx = max(self._seg_index(f) for f in files)
+            for f in sorted(files, key=self._seg_index):
+                idx = self._seg_index(f)
+                try:
+                    st = os.stat(f)
+                except OSError:
+                    continue
+                rec = w.get(f)
+                if rec is None:
+                    if final:
+                        # 收尾时才发现的新分段（比如录制刚开始就停了，
+                        # 或者重连后刚建的文件还没被巡检到）：
+                        # 用文件 mtime 当结束时间，按分段长度倒推开始时间
+                        seg_len = max(60, int(self.settings.get("rec_segment_min", 60)) * 60)
+                        end_t = st.st_mtime or now
+                        start_t = max(float(dev.get("rec_start") or 0) or (end_t - seg_len),
+                                      end_t - seg_len)
+                        w[f] = [start_t, st.st_size, end_t]
+                        rec = w[f]
+                    else:
+                        # 第一次看到：记下开始时间（文件创建时刻约等于分段开始）
+                        w[f] = [now, st.st_size, now]
+                        continue
+                if st.st_size != rec[1]:
+                    rec[1] = st.st_size
+                    rec[2] = now            # 还在写，刷新结束时间
+                closed = final or (idx < max_idx)
+                if not closed:
+                    continue
+                start, end = rec[0], rec[2]
+                a = time.localtime(start)
+                b = time.localtime(end)
+                # 跨天：结束也带日期
+                if (a.tm_year, a.tm_yday) != (b.tm_year, b.tm_yday):
+                    tail = time.strftime("%Y%m%d_%H%M%S", b)
+                else:
+                    tail = time.strftime("%H%M%S", b)
+                name = (f"{idx + 1:03d}_{time.strftime('%Y%m%d', a)}_"
+                        f"{time.strftime('%H%M%S', a)}-{tail}{os.path.splitext(f)[1]}")
+                dst = os.path.join(d, name)
+                if os.path.abspath(dst) == os.path.abspath(f):
+                    w.pop(f, None)
+                    continue
+                if os.path.exists(dst):
+                    base, e2 = os.path.splitext(name)
+                    k = 2
+                    while os.path.exists(os.path.join(d, f"{base}_{k}{e2}")):
+                        k += 1
+                    dst = os.path.join(d, f"{base}_{k}{e2}")
+                try:
+                    os.rename(f, dst)
+                    flog.log(f"分段重命名: {os.path.basename(f)} → {name}")
+                except OSError as e:
+                    flog.log(f"分段重命名失败 {f}: {e}")
+                w.pop(f, None)
+
     def _stop_dev_rec(self, dev):
         """停掉一台设备的录制（复用模式换回纯显示 / 后台模式杀进程）"""
+        if dev.get("rec_active"):
+            # 最后一段也要改名（此时文件已收尾）
+            try:
+                self._watch_and_rename_segments(dev, final=True)
+            except Exception:
+                pass
         if dev.get("rec") is None and dev.get("vreader") and dev.get("rec_active"):
             self._restart_reader_plain(dev)
         else:
@@ -990,6 +1084,11 @@ class App:
         """每秒刷新列表行文字；每 10 秒检查一次磁盘空间"""
         try:
             self._tick_n = getattr(self, "_tick_n", 0) + 1
+            # 每秒巡检一次分段文件：已经写完的（后面又出现了新分段）
+            # 立刻按"卷号_日期_开始-结束"改名
+            for _d in self.devices.values():
+                if _d.get("rec_active") and _d.get("rec_dir"):
+                    self._watch_and_rename_segments(_d)
             if self._tick_n % 5 == 0:
                 self._check_recorders_alive()
             if self._tick_n % 10 == 0:
